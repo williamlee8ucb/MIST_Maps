@@ -10,8 +10,6 @@ from rasterio.merge import merge
 import h5py
 from matplotlib.colors import LogNorm
 
-import TerrainData
-
 class ComboTile():
     
     def __init__(self, line):
@@ -23,7 +21,8 @@ class ComboTile():
         lat_deg, lat_direction = lat_coord.split()
         lon_deg, lon_direction = lon_coord.split()
 
-        self.center = (lat_deg, lat_direction, lon_deg, lon_direction)
+        #self.center = (lat_deg, lat_direction, lon_deg, lon_direction)
+        self.center = (float(lon_deg), float(lat_deg))
         
         degree_combinations = self.surrounding_tiles(float(lat_deg), float(lon_deg))
         print(degree_combinations)
@@ -37,6 +36,22 @@ class ComboTile():
         
         self.elevations = self.mosaic[0]
         self.shape = self.mosaic[0].shape
+
+    def get_lon_lat(self):
+        '''lat = y, lon = x'''
+        rows, cols = self.elevations.shape
+
+        # Arrays of row indices and column indices
+        row_idx = np.arange(rows)
+        col_idx = np.arange(cols)
+        
+        # Create 2D meshgrid
+        row_grid, col_grid = np.meshgrid(row_idx, col_idx, indexing="ij")
+        
+        # Use rasterio.transform.xy to convert all pixel centers
+        lon, lat = xy(self.transform, row_grid, col_grid)
+        
+        return lon, lat
 
     def surrounding_tiles(self, lat_center, lon_center, tile_size=1.0, grid_size=5):
         """Return an array of (lat, lon) pairs for a grid of surrounding tiles."""
@@ -100,7 +115,8 @@ class ComboTile():
             fig = ax.figure
 
         # Show the raster on this axes
-        im = show(np.log10(self.elevations), transform=self.transform, cmap='plasma', ax=ax)
+        im = show(self.elevations, transform=self.transform, cmap='plasma', ax=ax)
+        # ADD: option for log_scal
 
         # Grab the image object created by show
         im = ax.images[0]  # THIS is the AxesImage
@@ -125,16 +141,16 @@ class ComboTile():
         lat_rad = np.radians(mean_lat)
 
         dx_m = 111_320 * np.cos(lat_rad) * dx_deg
-        dy_m = 111_132 * dy_deg
+        dy_m = 111_320 * dy_deg
 
         # Compute gradients in meters
         grad_y, grad_x = np.gradient(self.elevations, dy_m, dx_m)
 
         # Slope magnitude and slope angle in degrees
-        slope = np.sqrt(grad_x**2 + grad_y**2)
-        slope_deg = np.degrees(np.arctan(slope))
+        #slope = np.sqrt(grad_x**2 + grad_y**2)
+        #slope_deg = np.degrees(np.arctan(slope))
 
-        return grad_x, grad_y, slope, slope_deg
+        return grad_x, grad_y
         # should be 3D -> at a given elevation point, what is the tangent plane? 
         # get quantities necessary to define a tangent plane at a given point (center and normal vector)
         # NEED NORMAL VECTOR
@@ -143,7 +159,9 @@ class ComboTile():
         """
         Visualize slope angles (in degrees) at each pixel.
         """
-        _, _, _, slope_deg = self.compute_gradient()
+        grad_x, grad_y = self.compute_gradient()
+        slope = np.sqrt(grad_x**2 + grad_y**2)
+        slope_deg = np.degrees(np.arctan(slope))
 
         if ax is None:
             fig, ax = plt.subplots(figsize=(8, 6))
@@ -165,7 +183,7 @@ class ComboTile():
                 slope_deg,
                 transform=self.transform,
                 cmap='inferno',
-                vmin = 0, vmax = 15,
+                vmin = 0, vmax = np.nanmax(15),
                 ax=ax,
                 title="Slope Angle Map (degrees)"
             )            
@@ -200,15 +218,142 @@ class ComboTile():
         )
 
         terrain.save_to_h5(file_name=file_name)
+       
+    def compute_azimuth(self):
+         
+         lon, lat = self.get_lon_lat() # x, y
+         clon, clat = self.center
+
+         meters_per_deg_lat = 111_320
+         meters_per_deg_lon = 111_320 * np.cos(np.radians(clat))
+        
+            
+         dlat = (lat - clat) * meters_per_deg_lat
+         dlon = (lon - clon) * meters_per_deg_lon # convert back to non-negative for JTile array
+            
+         theta = np.degrees(np.arctan2(dlat, dlon))  # arctan2(y, x)
+         theta = (theta + 360) % 360
+         r = np.sqrt(dlat**2 + dlon**2)
+            
+         return r, theta
+        
+    def max_per_bin_fast(self, bin_width = 0.01):
+        clon, clat = self.center
+        meters_per_deg_lat = 111_320
+        meters_per_deg_lon = 111_320 * np.cos(np.radians(clat))
+        
+        r, theta = self.compute_azimuth()
+        theta = theta % 360
+        center_x = int(len(self.elevations)/2)
+        center_y = int(len(self.elevations[0])/2)
+        
+        print(center_x, center_y)
+        r = r.flatten()
+        theta = theta.flatten()
+        z = self.elevations.flatten() - self.elevations[center_x][center_y] # FIX TO GENERALIZE
+        print(z)
+        # elevations data
+
+        bins = np.arange(0, 360 + bin_width/2, bin_width)
+        nbins = len(bins) - 1
+        
+        # Bin assignment
+        bin_idx = (theta // bin_width).astype(int)
+
+        
+        bin_idx[bin_idx == nbins] = nbins - 1
+        print("Bin Index:", bin_idx)
+    
+        # validity
+        valid = (r > 0) & (bin_idx >= 0) & (bin_idx < nbins)
+        print("Validation:", valid)
+    
+        elev_angle = np.degrees(np.arctan2(z[valid], r[valid]))
+        print("Elevations angle: ", elev_angle)
+    
+        order = np.lexsort((-elev_angle, bin_idx[valid]))
+        # returns a sorted array of indices, sorted by angle in descending order (-) and by bins in increasing ordr
+        # data product looks like elevation angles sorted per bin, and bins are sorted
+        print("ordering index mask", order)
+
+        
+        bin_sorted  = bin_idx[valid][order]
+        elev_sorted = elev_angle[order]
+        print('sorted elevations', elev_angle)
+    
+        # output
+        max_elev = np.full(nbins, np.nan)
+        print('max elev length',len(max_elev))
+    
+        # first occurrence per bin = max elevation
+        _, first = np.unique(bin_sorted, return_index=True)
+        print('first', first)
+        max_elev[bin_sorted[first]] = elev_sorted[first]
+        print('elevation maxes',max_elev)
+
+        print(f"len(bin_sorted): {len(bin_sorted)}")
+        print(f"len(elev_sorted): {len(elev_sorted)}")
+        print(f"unique bins: {len(np.unique(bin_sorted))}")
+    
+        return max_elev, elev_angle
         
 
+    def max_per_bin_iterative(self, bin_width=0.01):
+        clon, clat = self.center
+        meters_per_deg_lat = 111_320
+        meters_per_deg_lon = 111_320 * np.cos(np.radians(clat))
+        
+        r, theta = self.compute_azimuth()
+        theta = theta % 360.0
+        center_x = int(len(self.elevations)/2)
+        center_y = int(len(self.elevations[0])/2)
+        
+        r = r.flatten()
+        z = self.elevations.flatten() - self.elevations[center_x][center_y]
+    
+        bins = np.arange(0, 360 + bin_width/2, bin_width)
+        nbins = len(bins) - 1
+    
+        max_angle = np.full(nbins, -np.inf)
+        has_point = np.zeros(nbins, dtype=bool)
+    
+        # --- manual binning ---
+        for i in range(len(theta)):
+            if r[i] <= 0:
+                continue  # avoid division/angle pathologies
+    
+            b = int(theta[i] // bin_width)
+    
+            # circular edge case: 360° == 0°
+            if b == nbins:
+                b = 0
+    
+            angle = np.degrees(np.arctan2(z[i], r[i]))
+    
+            if angle > max_angle[b]:
+                max_angle[b] = angle
+                has_point[b] = True
+    
+        elev_angle = np.full(nbins, np.nan)
+        elev_angle[has_point] = max_angle[has_point]
+    
+        return elev_angle
+
+    # Change 'theta' parameter to 'az' to denote azimuth 
+    # adjust bin "tracking" to be the bin center rather than the bin edges 
+
+# get angle created with the max_angle
+# elev_angle = np.degrees(np.arctan2(max_elev, r)) -> get indices of maxes
+
+
+
 class JTile(ComboTile):
-    def __init__(self, file_name, root_dir="Gradient_Testing"):
+    def __init__(self, file_name, root_dir="ALOS_Data"):
         """
         Initialize JTile from a single DSM file.
         """
         print(file_name)
-        lat_coord, lon_coord = line.split('/')
+        lat_coord, lon_coord = file_name.split('/')
         
         lat_deg, lat_direction = lat_coord.split()
         lon_deg, lon_direction = lon_coord.split()
@@ -227,10 +372,10 @@ class JTile(ComboTile):
         # If needed, extract center coordinates from the raster bounds
         # e.g., for convenience:
         rows, cols = self.elevations.shape
-        tl = xy(self.transform, 0, 0)
-        br = xy(self.transform, rows-1, cols-1)
+        tl = xy(self.transform, 0, 0) # top left
+        br = xy(self.transform, rows-1, cols-1) # bottom right
         center_lat = (tl[1] + br[1]) / 2
         center_lon = (tl[0] + br[0]) / 2
-        self.center = (center_lat, center_lon)
+        self.center = (center_lon, center_lat)
 
    
