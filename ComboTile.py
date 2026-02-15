@@ -3,7 +3,7 @@ import rasterio.features
 import rasterio.transform
 import numpy as np
 import matplotlib.pyplot as plt
-from rasterio.transform import xy
+from rasterio.transform import xy, rowcol
 import pandas as pd
 from rasterio.plot import show
 from rasterio.merge import merge 
@@ -11,29 +11,50 @@ import h5py
 from matplotlib.colors import LogNorm
 
 class ComboTile():
-    
-    def __init__(self, line):
-        
+    def __init__(self, line, root_dir = '', center = []):
         # TODO: integrate functionality for just typing with a print statement; add error handling for if tile does not exist
         #coords = input("Enter a coordinate center with convention 000.000 S/000.000 W: ")
         lat_coord, lon_coord = line.split('/')
-        
         lat_deg, lat_direction = lat_coord.split()
         lon_deg, lon_direction = lon_coord.split()
-
         #self.center = (lat_deg, lat_direction, lon_deg, lon_direction)
-        self.center = (float(lon_deg), float(lat_deg))
         
+        if center:
+            self.center = (center[0], center[1])
+        else:
+            self.center = (float(lon_deg), float(lat_deg))
+
         degree_combinations = self.surrounding_tiles(float(lat_deg), float(lon_deg))
         print(degree_combinations)
-        
-        file_paths = [f"ALPSMLC30_{lat_direction}{combo[0]:03d}{lon_direction}{combo[1]:03d}_DSM.tif" for combo in degree_combinations]
-            
-        src_files_to_mosaic = [rasterio.open(file_path) for file_path in file_paths[:2]] ## remove indexing for full coverage
-        
-        
+        file_paths = [f"{root_dir}/ALPSMLC30_{lat_direction}{combo[0]:03d}{lon_direction}{combo[1]:03d}_DSM.tif" for combo in degree_combinations]
+
+        src_files_to_mosaic = []
+        failed_files = []
+        successful_files = []
+
+        for file_path in file_paths:  
+            try:
+                src = rasterio.open(file_path)
+                src_files_to_mosaic.append(src)
+                successful_files.append(file_path)
+            except FileNotFoundError:
+                failed_files.append((file_path, "File not found"))
+                print(f"Warning: Could not find {file_path}")
+            except Exception as e:
+                failed_files.append((file_path, str(e)))
+                print(f"Warning: Failed to open {file_path}: {e}")
+
+        if successful_files:
+            print(f"\n{len(successful_files)} file(s) successfully opened:")
+            for file_path in successful_files:
+                print(f"  - {file_path}")
+
+        if failed_files:
+            print(f"\n{len(failed_files)} file(s) failed to open:")
+            for file_path, error in failed_files:
+                print(f"  - {file_path}: {error}")
+
         self.mosaic, self.transform = merge(src_files_to_mosaic)
-        
         self.elevations = self.mosaic[0]
         self.shape = self.mosaic[0].shape
 
@@ -52,6 +73,15 @@ class ComboTile():
         lon, lat = xy(self.transform, row_grid, col_grid)
         
         return lon, lat
+    
+    def xy_to_lonlat(self, x, y):  # x=col, y=row
+        return xy(self.transform, y, x)  
+    
+    def lonlat_to_xy(self, lon, lat):
+        row, col = rowcol(self.transform, lon, lat)
+        return col, row  
+
+
 
     def surrounding_tiles(self, lat_center, lon_center, tile_size=1.0, grid_size=5):
         """Return an array of (lat, lon) pairs for a grid of surrounding tiles."""
@@ -231,7 +261,7 @@ class ComboTile():
          dlat = (lat - clat) * meters_per_deg_lat
          dlon = (lon - clon) * meters_per_deg_lon # convert back to non-negative for JTile array
             
-         theta = np.degrees(np.arctan2(dlat, dlon))  # arctan2(y, x)
+         theta = np.degrees(np.arctan2(dlon, dlat))  # arctan2(y, x)
          theta = (theta + 360) % 360
          r = np.sqrt(dlat**2 + dlon**2)
             
@@ -244,13 +274,12 @@ class ComboTile():
         
         r, theta = self.compute_azimuth()
         theta = theta % 360
-        center_x = int(len(self.elevations)/2)
-        center_y = int(len(self.elevations[0])/2)
+        center_x, center_y = self.lonlat_to_xy(lon = clon, lat = clat)
         
         print(center_x, center_y)
         r = r.flatten()
         theta = theta.flatten()
-        z = self.elevations.flatten() - self.elevations[center_x][center_y] # FIX TO GENERALIZE
+        z = self.elevations.flatten() - self.elevations[int(center_y), int(center_x)]
         print(z)
         # elevations data
 
@@ -279,72 +308,84 @@ class ComboTile():
         
         bin_sorted  = bin_idx[valid][order]
         elev_sorted = elev_angle[order]
+        r_sorted = r[valid][order]
+        z_sorted = z[valid][order]
         print('sorted elevations', elev_angle)
     
         # output
         max_elev = np.full(nbins, np.nan)
+        max_r = np.full(nbins, np.nan)
+        max_z = np.full(nbins, np.nan)
         print('max elev length',len(max_elev))
     
         # first occurrence per bin = max elevation
         _, first = np.unique(bin_sorted, return_index=True)
         print('first', first)
         max_elev[bin_sorted[first]] = elev_sorted[first]
+        max_r[bin_sorted[first]] = r_sorted[first]
+        max_z[bin_sorted[first]] = z_sorted[first]
         print('elevation maxes',max_elev)
 
         print(f"len(bin_sorted): {len(bin_sorted)}")
         print(f"len(elev_sorted): {len(elev_sorted)}")
         print(f"unique bins: {len(np.unique(bin_sorted))}")
+
+        # Get the original flattened indices of the max elevations
+        valid_indices = np.where(valid)[0]
+        max_indices = valid_indices[order[first]]
+
+        # Convert flattened indices back to 2D pixel coordinates (row, col)
+        rows = max_indices // self.elevations.shape[1]
+        cols = max_indices % self.elevations.shape[1]
+
+        # Convert pixel coordinates to lon/lat
+        max_coords = np.array([self.xy_to_lonlat(col, row) for col, row in zip(cols, rows)])
+
     
-        return max_elev, elev_angle
+        return max_elev, max_r, max_z, max_coords
+
+    def plot_max_per_bin(self, max_elev = [], max_r=[], max_z=[], bin_width=0.01):
+        """
+        Plot the outputs from max_per_bin_fast as subplots.
         
+        Parameters:
+        - max_elev: elevation angles (degrees)
+        - max_r: radial distances (meters)
+        - max_z: normalized elevations (meters)
+        - bin_width: bin width in degrees (for x-axis)
+        """
+        if not max_elev or not max_r or not max_z:
+            max_elev, max_r, max_z, _ = self.max_per_bin_fast(bin_width)
 
-    def max_per_bin_iterative(self, bin_width=0.01):
-        clon, clat = self.center
-        meters_per_deg_lat = 111_320
-        meters_per_deg_lon = 111_320 * np.cos(np.radians(clat))
+        nbins = len(max_elev)
+        azimuths = np.arange(nbins) * bin_width
         
-        r, theta = self.compute_azimuth()
-        theta = theta % 360.0
-        center_x = int(len(self.elevations)/2)
-        center_y = int(len(self.elevations[0])/2)
+        fig, axes = plt.subplots(3, 1, figsize=(12, 10))
         
-        r = r.flatten()
-        z = self.elevations.flatten() - self.elevations[center_x][center_y]
-    
-        bins = np.arange(0, 360 + bin_width/2, bin_width)
-        nbins = len(bins) - 1
-    
-        max_angle = np.full(nbins, -np.inf)
-        has_point = np.zeros(nbins, dtype=bool)
-    
-        # --- manual binning ---
-        for i in range(len(theta)):
-            if r[i] <= 0:
-                continue  # avoid division/angle pathologies
-    
-            b = int(theta[i] // bin_width)
-    
-            # circular edge case: 360° == 0°
-            if b == nbins:
-                b = 0
-    
-            angle = np.degrees(np.arctan2(z[i], r[i]))
-    
-            if angle > max_angle[b]:
-                max_angle[b] = angle
-                has_point[b] = True
-    
-        elev_angle = np.full(nbins, np.nan)
-        elev_angle[has_point] = max_angle[has_point]
-    
-        return elev_angle
-
-    # Change 'theta' parameter to 'az' to denote azimuth 
-    # adjust bin "tracking" to be the bin center rather than the bin edges 
-
-# get angle created with the max_angle
-# elev_angle = np.degrees(np.arctan2(max_elev, r)) -> get indices of maxes
-
+        # Elevation Angle
+        axes[0].plot(azimuths, max_elev, linewidth=1.5)
+        axes[0].set_ylabel("Elevation Angle (degrees)")
+        axes[0].set_title("Maximum Elevation Angle per Azimuth")
+        axes[0].grid(True, alpha=0.3)
+        axes[0].set_xlim(0, 360)
+        
+        # Radial Distance
+        axes[1].plot(azimuths, max_r, linewidth=1.5, color='orange')
+        axes[1].set_ylabel("Distance (meters)")
+        axes[1].set_title("Distance to Maximum Elevation Point per Azimuth")
+        axes[1].grid(True, alpha=0.3)
+        axes[1].set_xlim(0, 360)
+        
+        # Normalized Elevation (Z)
+        axes[2].plot(azimuths, max_z, linewidth=1.5, color='green')
+        axes[2].set_ylabel("Elevation Difference (meters)")
+        axes[2].set_xlabel("Azimuth (degrees)")
+        axes[2].set_title("Normalized Elevation (above center) per Azimuth")
+        axes[2].grid(True, alpha=0.3)
+        axes[2].set_xlim(0, 360)
+        
+        plt.tight_layout()
+        return fig, axes
 
 
 class JTile(ComboTile):
