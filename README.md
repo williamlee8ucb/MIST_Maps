@@ -26,15 +26,63 @@ Terrain elevation, slope mapping, and ENU-frame horizon sky-view analysis for Ea
 ## Installation
 
 ```bash
-python -m venv .venv
+git clone git@github.com:williamlee8ucb/MIST_Maps.git
+cd MIST_Maps
+
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+To use this environment inside Jupyter / VS Code notebooks, register it as a kernel:
+
+```bash
+python -m ipykernel install --user --name mist_maps --display-name "Python 3 (MIST_Maps .venv)"
+```
+
+> **Note on NumPy 2.x**: If running inside an existing Anaconda/system environment whose `scipy`, `h5py`, or `astropy` wheels were compiled against NumPy 1.x, either use the `.venv` kernel above or pin `pip install "numpy<2"`.
 
 Run the test suite:
 
 ```bash
 python -m unittest discover -s tests -v
+```
+
+## Quick Start
+
+### Earth Mosaic (`ComboTile`)
+
+```python
+from ComboTile import ComboTile
+
+site = ComboTile("79 N / 91 W", root_dir="Arctic_Data")
+obs_lon, obs_lat = -90.74778, 79.41861
+
+site.plot_map(observer=(obs_lon, obs_lat))
+site.plot_slope(want_log=False, vmax=30.0, observer=(obs_lon, obs_lat))
+
+az, max_el, max_r, max_z, max_coords = site.max_elev_enu(
+    bin_width=5.0, radius_max_meters=20_000.0, lon0=obs_lon, lat0=obs_lat
+)
+site.plot_horizon(az, max_el, max_r, max_z)
+print(ComboTile.sky_view_fraction(az, max_el))
+ComboTile.save_horizon_csv("horizon.csv", az, max_el, max_r, max_z, max_coords)
+```
+
+### Lunar DEM (`LunarTile`)
+
+```python
+from ComboTile import LunarTile
+
+moon = LunarTile("lunar_9.62_-20.08.tif", root_dir="Lunar_Test_Data")
+el_px, az_px, az, max_el, max_r, max_z, max_coords = moon.max_elev_enu(
+    bin_width=10.0,
+    radius_max_meters=100_000.0,
+    lon0=-20.08,
+    lat0=9.62,
+    include_curvature=True,
+)
+print(LunarTile.sky_view_fraction(az, max_el))
 ```
 
 ## Data Access
@@ -60,7 +108,7 @@ gdalwarp \
   Lunar_Test_Data/lunar_9.62_-20.08.tif
 ```
 
-Name files `lunar_{LAT}_{LON}.tif` so `LunarTile` can validate the center coordinates.
+`LunarTile` accepts any `.tif` filename (the `lunar_{LAT}_{LON}.tif` convention is recommended for clarity; bounds and center coordinates are always read from the GeoTIFF header).
 
 ## Documentation
 
