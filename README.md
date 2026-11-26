@@ -4,7 +4,7 @@ Terrain elevation, slope mapping, and ENU-frame horizon sky-view analysis for Ea
 
 ## Features
 
-- **`ComboTile`**: Mosaics a grid (default $5 \times 5$) of 1-degree ALOS World 3D 30 m (`ALPSMLC30_*_DSM.tif`) GeoTIFF tiles, computes latitude-scaled gradients and slope angles, plots elevation/slope maps, exports to HDF5, and computes azimuthal horizon profiles in the local East-North-Up (ENU) frame.
+- **`ComboTile`**: Mosaics a grid (default $5 \times 5$) of 1-degree ALOS World 3D 30 m (`ALPSMLC30_*_DSM.tif`) GeoTIFF tiles, computes per-row latitude-scaled gradients and slopes, plots elevation/slope/horizon maps, exports HDF5/CSV outputs, computes sky-view fractions, and evaluates windowed azimuthal horizon profiles in the local East-North-Up (ENU) frame.
 - **`JTile`**: Lightweight subclass of `ComboTile` for single-tile Earth DSM analysis.
 - **`LunarTile`**: Subclass of `ComboTile` adapted for USGS LRO WAC GLD100 lunar GeoTIFFs, using the IAU Moon reference ellipsoid, lunar radius $R_{\text{moon}} = 1{,}737{,}400\,\text{m}$, bilinear + linear observer reference interpolation, and 3-D ENU curvature-aware horizon angles.
 - **`TerrainData`**: Compressed HDF5 serialization/deserialization wrapper for 2-D terrain coordinate, elevation, gradient, and slope grids.

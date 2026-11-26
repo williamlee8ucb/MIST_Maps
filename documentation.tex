@@ -129,7 +129,7 @@ The constructor enumerates surrounding tiles via \texttt{surrounding\_tiles}, op
 
 \subsection{Coordinate and Bounds Utilities}
 \begin{itemize}
-  \item \textbf{\texttt{surrounding\_tiles(lat\_center, lon\_center, tile\_size=1.0, grid\_size=5)}}: Returns a list of integer \texttt{(lat, lon)} pairs spanning a \texttt{grid\_size} $\times$ \texttt{grid\_size} grid centered on \texttt{(lat\_center, lon\_center)}.
+  \item \textbf{\texttt{surrounding\_tiles(lat\_center, lon\_center, tile\_size=1.0, grid\_size=5)}}: Returns a list of integer \texttt{(lat, lon)} pairs spanning a \texttt{grid\_size} $\times$ \texttt{grid\_size} grid centered on \texttt{(lat\_center, lon\_center)}. In \texttt{ComboTile.\_\_init\_\_}, signed offsets crossing $0^\circ$ latitude or longitude automatically resolve hemisphere labels (\texttt{N/S}, \texttt{E/W}).
   \item \textbf{\texttt{get\_lon\_lat()}}: Returns two 2-D NumPy arrays \texttt{(lon, lat)} in degrees giving the geographic coordinates of every pixel center via \texttt{rasterio.transform.xy}.
   \item \textbf{\texttt{xy\_to\_lonlat(x, y)}}: Converts pixel column/row \texttt{(x, y)} to \texttt{(lon, lat)} degrees.
   \item \textbf{\texttt{lonlat\_to\_xy(lon, lat)}}: Converts geographic \texttt{(lon, lat)} degrees to pixel \texttt{(col, row)}.
@@ -139,21 +139,24 @@ The constructor enumerates surrounding tiles via \texttt{surrounding\_tiles}, op
 
 \subsection{Gradient, Slope, and Visualization}
 \begin{itemize}
-  \item \textbf{\texttt{compute\_gradient()}}: Converts pixel spacing from degrees to meters using Earth's mean equatorial scaling ($111{,}320\,\text{m/deg}$) evaluated at the tile's center latitude $\bar{\phi}$:
+  \item \textbf{\texttt{compute\_gradient()}}: Converts pixel spacing from degrees to meters using Earth's mean equatorial scaling ($111{,}320\,\text{m/deg}$) evaluated per row at each row latitude $\phi_i$:
   \begin{equation}
-    \Delta x_{\mathrm{m}} = 111{,}320 \cos(\bar{\phi}) \, |\Delta\lambda_{\mathrm{deg}}|, \qquad
+    \Delta x_{\mathrm{m}}(\phi_i) = 111{,}320 \cos(\phi_i) \, |\Delta\lambda_{\mathrm{deg}}|, \qquad
     \Delta y_{\mathrm{m}} = 111{,}320 \, |\Delta\phi_{\mathrm{deg}}|.
   \end{equation}
-  Replaces \texttt{nodata} pixels with \texttt{NaN} before applying \texttt{numpy.gradient} and returns \texttt{(grad\_x, grad\_y)} in $\mathrm{m\,m^{-1}}$.
+  Replaces \texttt{nodata} pixels with \texttt{NaN} prior to differentiation and returns \texttt{(grad\_x, grad\_y)} in $\mathrm{m\,m^{-1}}$.
   \item \textbf{\texttt{compute\_slope()}}: Calls \texttt{compute\_gradient()} and computes slope magnitude $\|\nabla z\| = \sqrt{(\partial z/\partial x)^2 + (\partial z/\partial y)^2}$ and slope angle $\alpha = \arctan(\|\nabla z\|)$ in degrees. Returns \texttt{(grad\_x, grad\_y, slope, slope\_deg)}.
-  \item \textbf{\texttt{plot\_map(ax=None)}}: Masks \texttt{nodata} pixels and renders the elevation raster with \texttt{rasterio.plot.show} using the \texttt{plasma} colormap. Returns \texttt{(fig, ax)}.
-  \item \textbf{\texttt{plot\_slope(want\_log=False, ax=None, vmax=15.0)}}: Renders terrain slope angles in degrees using the \texttt{inferno} colormap (linear $[0, \texttt{vmax}]$ or logarithmic \texttt{LogNorm}). Returns \texttt{(fig, ax)}.
+  \item \textbf{\texttt{plot\_map(ax=None, cmap="plasma", observer=None)}}: Masks \texttt{nodata} pixels, renders the elevation raster with \texttt{rasterio.plot.show}, and optionally plots an \texttt{(lon, lat)} observer marker. Returns \texttt{(fig, ax)}.
+  \item \textbf{\texttt{plot\_slope(want\_log=False, ax=None, vmax=15.0, cmap="inferno", observer=None)}}: Renders terrain slope angles in degrees (linear $[0, \texttt{vmax}]$ or logarithmic \texttt{LogNorm}) with an optional observer marker. Returns \texttt{(fig, ax)}.
+  \item \textbf{\texttt{plot\_horizon(az\_centers, max\_elev, max\_r=None, max\_z=None, polar=False, ax=None)}}: Plots the binned horizon profile as either a polar sky-view diagram (\texttt{polar=True}) or Cartesian panels (elevation angle, radial distance, and height offset). Returns \texttt{(fig, ax\_or\_axes)}.
 \end{itemize}
 
-\subsection{Data Export}
+\subsection{Data Export and Sky-View Metrics}
 \begin{itemize}
   \item \textbf{\texttt{map\_table(want\_grad=False)}}: Returns an $(N, 3)$ array \texttt{[lat, lon, elev]} when \texttt{want\_grad=False}, or an $(N, 7)$ array \texttt{[lat, lon, elev, grad\_x, grad\_y, slope, slope\_deg]} when \texttt{want\_grad=True}.
   \item \textbf{\texttt{save\_data(file\_name, compute\_gradients=True)}}: Builds a \texttt{TerrainData} object and writes it to a compressed HDF5 file at \texttt{file\_name}.
+  \item \textbf{\texttt{save\_horizon\_csv(file\_name, az\_centers, max\_elev, max\_r, max\_z, max\_coords)}}: Static method exporting binned horizon profiles to CSV.
+  \item \textbf{\texttt{sky\_view\_fraction(az\_centers, max\_elev)}}: Static method returning mean/min/max horizon angles together with unobstructed sky solid-angle fraction $\langle 1 - \sin\epsilon_+ \rangle$ and $\cos^2$-weighted sky-view factor $\langle \cos^2\epsilon_+ \rangle$ (where $\epsilon_+ = \max(\epsilon, 0)$).
 \end{itemize}
 
 \subsection{ENU Horizon Analysis: \texttt{max\_elev\_enu}}
@@ -190,17 +193,17 @@ Loads a single 1-degree ALOS GeoTIFF without mosaicking, storing \texttt{self.el
 \begin{lstlisting}
 tile = LunarTile("lunar_9.62_-20.08.tif", root_dir="Lunar_Test_Data", verbose=True)
 \end{lstlisting}
-Expects filenames of the form \texttt{lunar\_\{LAT\}\_\{LON\}.tif}. Opens the GeoTIFF, stores \texttt{self.geo\_bounds}, pre-computes 2-D geographic grids \texttt{\_lon\_grid} and \texttt{\_lat\_grid}, sets \texttt{self.lunar\_radius = 1\_737\_400.0}\,m, and records \texttt{self.geo\_resolution} in degrees/pixel.
+Supports both \texttt{lunar\_\{LAT\}\_\{LON\}.tif} filenames and arbitrary \texttt{.tif} paths; bounds and center coordinates are read directly from the GeoTIFF header. Pre-computes 2-D geographic grids \texttt{\_lon\_grid} and \texttt{\_lat\_grid}, sets \texttt{self.lunar\_radius = 1\_737\_400.0}\,m, and records \texttt{self.geo\_resolution} in degrees/pixel.
 
 \subsection{Overridden Methods}
 \begin{itemize}
   \item \textbf{\texttt{get\_lon\_lat()}}: Returns pre-computed \texttt{(\_lon\_grid, \_lat\_grid)} in degrees.
-  \item \textbf{\texttt{compute\_gradient()}}: Scales degree pixel spacing using the lunar mean radius $R_{\text{moon}} = 1{,}737{,}400\,\text{m}$ at center latitude $\bar{\phi}$:
+  \item \textbf{\texttt{compute\_gradient()}}: Scales degree pixel spacing per row using the lunar mean radius $R_{\text{moon}} = 1{,}737{,}400\,\text{m}$ at row latitude $\phi_i$:
   \begin{equation}
-    \Delta x_{\mathrm{m}} = \frac{\pi R_{\text{moon}}}{180} \cos(\bar{\phi}) \, |\Delta\lambda_{\mathrm{deg}}|, \qquad
+    \Delta x_{\mathrm{m}}(\phi_i) = \frac{\pi R_{\text{moon}}}{180} \cos(\phi_i) \, |\Delta\lambda_{\mathrm{deg}}|, \qquad
     \Delta y_{\mathrm{m}} = \frac{\pi R_{\text{moon}}}{180} \, |\Delta\phi_{\mathrm{deg}}|.
   \end{equation}
-  \item \textbf{\texttt{plot\_map(ax=None)}}: Masks \texttt{nodata} values and plots via \texttt{matplotlib.axes.Axes.imshow} with geographic degree extents. Returns \texttt{(fig, ax)}.
+  \item \textbf{\texttt{plot\_map(ax=None, cmap="plasma", observer=None)}}: Masks \texttt{nodata} values, plots via \texttt{matplotlib.axes.Axes.imshow} with geographic degree extents, and optionally marks \texttt{observer}. Returns \texttt{(fig, ax)}.
   \item \textbf{\texttt{max\_elev\_enu(...)}}:
 \end{itemize}
 \begin{lstlisting}
@@ -333,8 +336,8 @@ Passing the Moon ellipsoid to \texttt{geodetic2enu} is essential: at 100\,km hor
 
 \subsection{Degree-to-Meter Scaling in \texttt{compute\_gradient}}
 \begin{itemize}
-  \item \textbf{Earth (\texttt{ComboTile})}: Uses $111{,}320\,\text{m\,deg}^{-1}$ ($\Delta x_{\mathrm{m}} = 111{,}320 \cos(\bar{\phi})|\Delta\lambda_{\mathrm{deg}}|$, $\Delta y_{\mathrm{m}} = 111{,}320|\Delta\phi_{\mathrm{deg}}|$).
-  \item \textbf{Moon (\texttt{LunarTile})}: Uses $\pi R_{\text{moon}}/180 \approx 30{,}323\,\text{m\,deg}^{-1}$ ($\approx 27\%$ of Earth's scaling) with $R_{\text{moon}} = 1{,}737{,}400\,\text{m}$.
+  \item \textbf{Earth (\texttt{ComboTile})}: Uses $111{,}320\,\text{m\,deg}^{-1}$ ($\Delta x_{\mathrm{m}}(\phi_i) = 111{,}320 \cos(\phi_i)|\Delta\lambda_{\mathrm{deg}}|$, $\Delta y_{\mathrm{m}} = 111{,}320|\Delta\phi_{\mathrm{deg}}|$ per row).
+  \item \textbf{Moon (\texttt{LunarTile})}: Uses $\pi R_{\text{moon}}/180 \approx 30{,}323\,\text{m\,deg}^{-1}$ ($\approx 27\%$ of Earth's scaling) per row with $R_{\text{moon}} = 1{,}737{,}400\,\text{m}$.
 \end{itemize}
 
 \subsection{Input Data Structure and Plotting}
