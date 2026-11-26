@@ -1,0 +1,125 @@
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[margin=0.88in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{tcolorbox}
+\usepackage{enumitem}
+
+\definecolor{navy}{HTML}{1B3B6F}
+\definecolor{slate}{HTML}{475569}
+\definecolor{boxbg}{HTML}{F8FAFC}
+\definecolor{warnbg}{HTML}{FFFBEB}
+\definecolor{warnframe}{HTML}{D97706}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=navy,
+  urlcolor=navy,
+  pdftitle={MIST\_Maps Capabilities and Limitations Report},
+  pdfauthor={William Lee}
+}
+
+\setlist[itemize]{itemsep=2pt, topsep=3pt, parsep=0pt}
+\setlist[enumerate]{itemsep=2pt, topsep=3pt, parsep=0pt}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small\color{slate}MIST\_Maps Deliverable Report}
+\rhead{\small\color{slate}Capabilities \& Limitations}
+\cfoot{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\begin{document}
+
+% ---- Report Header ----
+\noindent
+{\LARGE\bfseries\color{navy} MIST\_Maps: Package Capabilities \& Limitations Report}\\[4pt]
+{\color{slate}\large Technical Deliverable Summary for Earth and Lunar Horizon Terrain Analysis}\\[8pt]
+\rule{\linewidth}{1.2pt}\\[6pt]
+{\small
+\begin{tabular}{@{}ll@{\hspace{0.4cm}}ll@{}}
+  \textbf{Repository:} & \texttt{MIST\_Maps} (\texttt{ComboTile}, \texttt{TerrainData}, \texttt{JAXA\_Scrape}) & \textbf{Date:} & Nov 25, 2026 \\
+  \textbf{Datasets:} & ALOS AW3D30 (30\,m) \& LRO WAC GLD100 (100\,m) & \textbf{Tests:} & 10/10 passing (5.5\,s) \\
+\end{tabular}}\\[4pt]
+\rule{\linewidth}{0.6pt}
+
+\vspace{0.3cm}
+
+\begin{tcolorbox}[colback=boxbg,colframe=navy,boxrule=0.8pt,title={\textbf{Executive Summary}}]
+\texttt{MIST\_Maps} is a Python terrain-analysis toolkit built to characterize local sky-view obstruction, elevation relief, and terrain slopes around candidate observation sites on Earth and the Moon. The cleaned codebase is production-ready for single-site and small-batch horizon profiling using geographic GeoTIFF Digital Surface/Elevation Models (DSMs/DEMs), featuring automated $5\times 5$ tile mosaicking, per-row latitude-scaled gradients, windowed local East-North-Up (ENU) projection, curvature-aware lunar horizon modeling, HDF5/CSV export, and reproducible demo and test suites. Its primary constraints lie in geographic-CRS assumptions (excluding unprojected polar grids above $79^\circ$), asymmetric Earth/Moon return signatures, and the absence of sub-pixel ray-marching or atmospheric refraction modeling.
+\end{tcolorbox}
+
+\section{Current Capabilities}
+
+\subsection{Raster Ingestion, Mosaicking, and Coordinate Utilities}
+\begin{itemize}
+  \item \textbf{Multi-tile Earth mosaicking (\texttt{ComboTile})}: Discovers and merges a configurable square grid (default $5\times 5$) of 1-degree ALOS World 3D 30\,m (\texttt{ALPSMLC30\_*\_DSM.tif}) tiles via \texttt{rasterio.merge.merge}. Missing edge/ocean tiles are skipped with warnings, and fill values (\texttt{nodata}) are masked across downstream calculations. Signed grid offsets crossing $0^\circ$ latitude or longitude resolve \texttt{N/S} and \texttt{E/W} hemisphere labels automatically.
+  \item \textbf{Single-tile Earth \& Moon loading (\texttt{JTile}, \texttt{LunarTile})}: \texttt{JTile} loads individual ALOS GeoTIFFs by coordinate string or filename. \texttt{LunarTile} loads clipped USGS LRO WAC GLD100 GeoTIFFs (accepting arbitrary \texttt{.tif} filenames), deriving bounds, resolution, and center coordinates from raster metadata.
+  \item \textbf{Coordinate transforms}: Bidirectional pixel-to-geographic conversions (\texttt{xy\_to\_lonlat}, \texttt{lonlat\_to\_xy}, \texttt{get\_lon\_lat}, \texttt{tile\_bounds}, \texttt{get\_elevation}).
+\end{itemize}
+
+\subsection{ENU Horizon Profiling and Planetary Physics}
+\begin{itemize}
+  \item \textbf{Windowed local ENU projection (\texttt{max\_elev\_enu})}: Pre-crops the raster to a bounding box covering \texttt{radius\_max\_meters} around explicit observer coordinates \texttt{(lon0, lat0)} before invoking \texttt{pymap3d.geodetic2enu}, cutting full-suite runtime from 22.8\,s to 5.5\,s without altering numerical output.
+  \item \textbf{Observer ground-elevation interpolation}: Avoids single-pixel height jumps via cubic \texttt{griddata} within \texttt{radius0\_meters} (default 200\,m) on Earth, and bilinear corner seeding followed by linear \texttt{griddata} (default 1000\,m) on the Moon.
+  \item \textbf{Curvature handling}: Uses the IAU 2015 Moon ellipsoid (\texttt{pm.Ellipsoid.from\_name("moon")}) and 3-D ENU \texttt{up} coordinates by default on the Moon (\texttt{include\_curvature=True} over 100\,km baselines, where curvature drops terrain by $\approx 2.88\,\text{km}$ / $1.65^\circ$), and flat height differences by default on Earth (\texttt{include\_curvature=False} over 20\,km baselines, $< 0.09^\circ$ difference; toggleable via \texttt{include\_curvature=True}).
+  \item \textbf{Wraparound-safe azimuth binning}: Duplicates $[{-180}^\circ, 180^\circ]$ azimuths by $+360^\circ$ so bins centered on $0^\circ$ and $360^\circ$ have seamless coverage, returning peak elevation angles, distances, height offsets, and \texttt{(lon, lat)} coordinates.
+\end{itemize}
+
+\subsection{Terrain Derivatives, Visualization, and Data Export}
+\begin{itemize}
+  \item \textbf{Per-row latitude-scaled gradients \& slopes (\texttt{compute\_gradient}, \texttt{compute\_slope})}: Scales degree pixel spacing per row using $\cos(\phi_i)$ with body-appropriate constants ($111{,}320\,\text{m/deg}$ on Earth; $\pi R_{\text{moon}}/180 \approx 30{,}323\,\text{m/deg}$ on the Moon) and \texttt{NaN}-masked \texttt{nodata} pixels.
+  \item \textbf{Visualization (\texttt{plot\_map}, \texttt{plot\_slope}, \texttt{plot\_horizon})}: Elevation maps, linear/log slope maps with optional observer markers, stacked 3-panel horizon profiles, and polar sky-view diagrams.
+  \item \textbf{Sky-view metrics \& exports}: \texttt{sky\_view\_fraction()} computes mean/min/max horizon angles, solid-angle unobstructed sky fraction $\langle 1 - \sin\epsilon_+\rangle$, and cosine-weighted sky-view factor $\langle \cos^2\epsilon_+\rangle$. Results export to CSV (\texttt{save\_horizon\_csv}), flat NumPy tables (\texttt{map\_table}), and gzip-compressed HDF5 (\texttt{save\_data} / \texttt{TerrainData}).
+\end{itemize}
+
+\section{Verified Benchmark Results}
+Table~\ref{tab:sites} summarizes outputs verified in the executed demo notebook (\texttt{ComboTile\_Demo.ipynb}) and test suite (\texttt{tests/test\_combotile.py}, 10/10 passing).
+
+\begin{table}[h!]
+\centering
+\small
+\caption{Observed horizon and sky-view metrics across bundled Earth and Lunar test sites.}
+\label{tab:sites}
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+\textbf{Site} & \textbf{Class / Radius} & \textbf{Mean} & \textbf{Max} & \textbf{SVF (Solid)} & \textbf{SVF ($\cos^2$)} \\
+\midrule
+Axel Heiberg (\texttt{mars2024\_spot1}) & \texttt{ComboTile} (20\,km) & $8.53^\circ$ & $14.16^\circ$ & $0.852$ & $0.974$ \\
+Copernicus ($9.62^\circ\text{N}, -20.08^\circ\text{E}$) & \texttt{LunarTile} (100\,km) & $13.03^\circ$ & $29.63^\circ$ & $0.779$ & $0.923$ \\
+Tycho ($-43.37^\circ\text{N}, -11.36^\circ\text{E}$) & \texttt{LunarTile} (100\,km) & $3.62^\circ$ & $6.01^\circ$ & $0.937$ & $0.996$ \\
+Equatorial Mare ($0.0^\circ\text{N}, 0.0^\circ\text{E}$) & \texttt{LunarTile} (100\,km) & $0.10^\circ$ & $0.55^\circ$ & $0.997$ & $1.000$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Known Limitations and Design Constraints}
+
+\subsection{Coordinate Reference System (CRS) and Polar Coverage}
+\begin{itemize}
+  \item \textbf{Geographic degree assumption}: \texttt{compute\_gradient} and \texttt{max\_elev\_enu} assume raster affine transforms are in geographic degrees (longitude/latitude). Projected DEMs (e.g., UTM or polar stereographic grids) are not automatically reprojected.
+  \item \textbf{Lunar high-latitude gap}: Because the USGS LRO WAC GLD100 mosaic covers $79^\circ\text{S}$--$79^\circ\text{N}$, lunar polar studies above $79^\circ$ (such as South Pole LOLA polar stereographic DEMs) require external reprojection to geographic coordinates before loading into \texttt{LunarTile}.
+\end{itemize}
+
+\subsection{Modeling Simplifications}
+\begin{itemize}
+  \item \textbf{Discrete pixel-center sampling}: \texttt{max\_elev\_enu} evaluates elevation angles at discrete pixel centers rather than ray-marching interpolated terrain profiles; \texttt{LunarTile} applies a 500\,m minimum-radius guard to prevent coarse 100\,m adjacent pixels from skewing near-field bins.
+  \item \textbf{No atmospheric refraction or beam weighting}: Earth horizon profiles are purely geometric (no tropospheric radio refraction), and \texttt{sky\_view\_fraction} assumes an isotropic/Lambertian sky rather than a site-specific antenna beam pattern.
+\end{itemize}
+
+\subsection{Architecture, Performance, and Ingestion Constraints}
+\begin{itemize}
+  \item \textbf{Asymmetric subclass hierarchy and signatures}: \texttt{ComboTile} serves simultaneously as the Earth mosaic loader and base class for single-tile \texttt{JTile} and \texttt{LunarTile}. Moreover, \texttt{max\_elev\_enu} returns a 5-tuple on \texttt{ComboTile} vs.\ a 7-tuple on \texttt{LunarTile} (prepending raw per-pixel arrays), preventing fully polymorphic calls.
+  \item \textbf{Full-mosaic memory on tabular export}: While \texttt{max\_elev\_enu} is windowed, \texttt{map\_table()} and \texttt{save\_data()} materialize the full merged mosaic in memory (e.g., $18{,}000 \times 6{,}000$ floats for \texttt{Arctic\_Data}).
+  \item \textbf{Scraper \& environment sensitivity}: \texttt{JAXA\_Scrape.py} depends on Selenium browser automation against JAXA's legacy HTML image-map portal (and manual login), making OpenTopography S3 or manual download more reliable when portal layouts change. On systems with mixed NumPy 1.x/2.x binary packages, a dedicated virtual environment (\texttt{requirements.txt}) is required.
+\end{itemize}
+
+\section{Summary Recommendation}
+\texttt{MIST\_Maps} is well-suited in its current state for targeted Earth and non-polar Lunar site assessments, exploratory notebooks, and horizon-profile exports. If future work expands to \textbf{lunar polar regions ($>79^\circ$)}, \textbf{large multi-site optimization sweeps}, or \textbf{integration into automated MIST simulation pipelines}, the highest-leverage next steps are: (1) adding CRS-aware reprojection via \texttt{pyproj}/\texttt{rasterio.warp}, (2) unifying the class hierarchy around an abstract \texttt{TerrainTile} + \texttt{BodyModel} returning a single \texttt{HorizonProfile} dataclass, and (3) replacing Selenium scraping with direct S3/HTTP tile fetching.
+
+\end{document}
