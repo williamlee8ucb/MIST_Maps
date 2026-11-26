@@ -144,7 +144,7 @@ The constructor enumerates surrounding tiles via \texttt{surrounding\_tiles}, op
     \Delta x_{\mathrm{m}}(\phi_i) = 111{,}320 \cos(\phi_i) \, |\Delta\lambda_{\mathrm{deg}}|, \qquad
     \Delta y_{\mathrm{m}} = 111{,}320 \, |\Delta\phi_{\mathrm{deg}}|.
   \end{equation}
-  Replaces \texttt{nodata} pixels with \texttt{NaN} prior to differentiation and returns \texttt{(grad\_x, grad\_y)} in $\mathrm{m\,m^{-1}}$.
+  Replaces \texttt{nodata} pixels with \texttt{NaN} prior to differentiation and returns \texttt{(grad\_x, grad\_y)} in $\mathrm{m\,m^{-1}}$ (note that \texttt{grad\_y} is differentiated along increasing row index, i.e.\ southward for north-up rasters; slope magnitude is unaffected).
   \item \textbf{\texttt{compute\_slope()}}: Calls \texttt{compute\_gradient()} and computes slope magnitude $\|\nabla z\| = \sqrt{(\partial z/\partial x)^2 + (\partial z/\partial y)^2}$ and slope angle $\alpha = \arctan(\|\nabla z\|)$ in degrees. Returns \texttt{(grad\_x, grad\_y, slope, slope\_deg)}.
   \item \textbf{\texttt{plot\_map(ax=None, cmap="plasma", observer=None)}}: Masks \texttt{nodata} pixels, renders the elevation raster with \texttt{rasterio.plot.show}, and optionally plots an \texttt{(lon, lat)} observer marker. Returns \texttt{(fig, ax)}.
   \item \textbf{\texttt{plot\_slope(want\_log=False, ax=None, vmax=15.0, cmap="inferno", observer=None)}}: Renders terrain slope angles in degrees (linear $[0, \texttt{vmax}]$ or logarithmic \texttt{LogNorm}) with an optional observer marker. Returns \texttt{(fig, ax)}.
@@ -284,7 +284,7 @@ gdalwarp \
   \item \texttt{-te xmin ymin xmax ymax}: Geographic bounding box in degrees (here a $5^\circ \times 5^\circ$ box centered on Copernicus Crater at $9.62^\circ\text{N}, -20.08^\circ\text{E}$).
   \item \texttt{-te\_srs} and \texttt{-t\_srs}: Inline lunar spherical CRS ($a = b = 1{,}737{,}400\,\text{m}$) matching the USGS mosaic's body-fixed sphere.
   \item \texttt{/vsicurl/...}: GDAL HTTP range-request streaming; only intersecting tiles are transferred.
-  \item Output path: Name files \texttt{lunar\_\{LAT\}\_\{LON\}.tif} so \texttt{LunarTile} can validate center coordinates.
+  \item Output path: Any \texttt{.tif} filename works; naming files \texttt{lunar\_\{LAT\}\_\{LON\}.tif} is recommended for clarity.
 \end{itemize}
 
 \subsection{Earth DEM --- ALOS World 3D 30\,m (AW3D30)}
@@ -327,12 +327,12 @@ Although \texttt{ComboTile} and \texttt{LunarTile} share a common API, physical 
 Equatorial radius $a$ & $6{,}378{,}137\,\text{m}$ & $1{,}738{,}100\,\text{m}$ \\
 Polar radius $b$ & $6{,}356{,}752.3\,\text{m}$ & $1{,}736{,}000\,\text{m}$ \\
 Mean spherical radius $R$ & $6{,}371{,}000\,\text{m}$ & $1{,}737{,}400\,\text{m}$ \\
-Flattening $f$ & $1/298.257$ & $\approx 1/825$ \\
+Flattening $f$ & $1/298.257$ & $\approx 1/827.67$ \\
 \texttt{pymap3d} ellipsoid & Default (\texttt{wgs84}) & \texttt{pm.Ellipsoid.from\_name("moon")} \\
 \bottomrule
 \end{tabular}
 \end{center}
-Passing the Moon ellipsoid to \texttt{geodetic2enu} is essential: at 100\,km horizontal range, using Earth's ellipsoid would misplace ENU coordinates and curvature drops by roughly a factor of $3.67$.
+Passing the Moon ellipsoid to \texttt{geodetic2enu} is essential: Earth's equatorial radius is $\approx 3.67\times$ larger than the Moon's, so using Earth's ellipsoid would stretch horizontal ENU distances by $\sim 3.67\times$ and underestimate surface curvature drops by the same factor.
 
 \subsection{Degree-to-Meter Scaling in \texttt{compute\_gradient}}
 \begin{itemize}
