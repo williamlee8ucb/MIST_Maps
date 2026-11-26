@@ -1,0 +1,388 @@
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[margin=0.95in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{tcolorbox}
+
+\definecolor{navy}{HTML}{1B3B6F}
+\definecolor{codebg}{HTML}{F5F7FA}
+\definecolor{codeframe}{HTML}{D0D7DE}
+\definecolor{notebg}{HTML}{FFFBEB}
+\definecolor{noteframe}{HTML}{D97706}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=navy,
+  urlcolor=navy,
+  citecolor=navy,
+  pdftitle={MIST\_Maps / ComboTile Code Documentation},
+  pdfauthor={William Lee}
+}
+
+\lstset{
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{codeframe},
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  language=Python
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small\color{gray}MIST\_Maps Terrain Analysis Library}
+\rhead{\small\color{gray}\leftmark}
+\cfoot{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\newtcolorbox{notebox}[1][Note]{
+  colback=notebg,
+  colframe=noteframe,
+  fonttitle=\bfseries,
+  title=#1
+}
+
+\begin{document}
+
+% ---- Title Page ----
+\begin{titlepage}
+  \centering
+  \vspace*{1.6cm}
+  {\Huge\bfseries\color{navy} MIST\_Maps Code Documentation \par}
+  \vspace{0.6cm}
+  {\large\color{navy} \texttt{ComboTile}, \texttt{JTile}, \texttt{LunarTile}, \texttt{TerrainData}, and \texttt{JAXA\_Scrape} \par}
+  \vspace{0.8cm}
+  {\Large William Lee \par}
+  \vspace{1.2cm}
+
+  \begin{tcolorbox}[colback=white,colframe=navy,boxrule=1.2pt,width=0.88\textwidth]
+    \centering
+    A Python library for loading, mosaicking, and analyzing Digital Surface and Elevation Models (DSMs/DEMs) on both Earth (ALOS World 3D 30\,m) and the Moon (USGS LRO WAC GLD100), supporting terrain gradient/slope mapping, HDF5 serialization, and local East-North-Up (ENU) horizon sky-view profiling.
+  \end{tcolorbox}
+
+  \vspace{1.6cm}
+  \begin{tabular}{@{}ll@{}}
+    \toprule
+    \textbf{Core Module} & \texttt{ComboTile.py} \\
+    \textbf{Serialization} & \texttt{TerrainData.py} \\
+    \textbf{Data Acquisition} & \texttt{JAXA\_Scrape.py} \\
+    \textbf{Example Notebook} & \texttt{ComboTile\_Demo.ipynb} \\
+    \textbf{Classes} & \texttt{ComboTile}, \texttt{JTile}, \texttt{LunarTile}, \texttt{TerrainData} \\
+    \textbf{Language} & Python 3.10+ \\
+    \bottomrule
+  \end{tabular}
+
+  \vfill
+  {\small\color{gray} Documentation compiled from the cleaned MIST\_Maps repository \par}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+\section{Overview}
+The \texttt{MIST\_Maps} codebase provides raster terrain loading, coordinate conversion, gradient/slope analysis, and local-horizon obstruction profiling for radio-astronomy and planetary site characterization:
+\begin{itemize}
+  \item \textbf{\texttt{ComboTile}} (\texttt{ComboTile.py}): Base class that discovers and merges a $5\times 5$ (configurable) grid of 1-degree ALOS World 3D 30\,m (\texttt{ALPSMLC30\_*\_DSM.tif}) tiles, masks \texttt{nodata} fill values, computes latitude-scaled gradients and slopes, exports tabular or HDF5 outputs, and computes azimuthal horizon profiles in the local East-North-Up (ENU) frame.
+  \item \textbf{\texttt{JTile}} (\texttt{ComboTile.py}): Subclass of \texttt{ComboTile} for loading a single ALOS GeoTIFF DSM file without mosaicking.
+  \item \textbf{\texttt{LunarTile}} (\texttt{ComboTile.py}): Subclass of \texttt{ComboTile} adapted for USGS LRO WAC GLD100 lunar GeoTIFF clips (100\,m/pixel), using the IAU lunar ellipsoid in \texttt{pymap3d}, lunar radius $R_{\text{moon}} = 1{,}737{,}400\,\text{m}$, two-stage observer elevation interpolation, and 3-D ENU curvature-aware horizon angles over 100\,km baselines.
+  \item \textbf{\texttt{TerrainData}} (\texttt{TerrainData.py}): Compressed HDF5 wrapper storing 2-D latitude, longitude, elevation, gradient, and slope grids.
+  \item \textbf{\texttt{JAXA\_Scrape.py}}: Selenium and BeautifulSoup automation utility for downloading and unpacking ALOS AW3D30 GeoTIFF tiles after user registration.
+\end{itemize}
+
+\section{Architecture and Class Hierarchy}
+\begin{verbatim}
+ComboTile  (Earth 5x5 ALOS mosaic base class)
+  |-- JTile      (single-file Earth ALOS DSM tile)
+  |-- LunarTile  (single-file USGS LRO WAC GLD100 lunar DEM tile)
+
+TerrainData  (standalone HDF5 wrapper used by ComboTile.save_data)
+JAXA_Scrape  (CLI script for automated AW3D30 download and extraction)
+\end{verbatim}
+
+\texttt{JTile} inherits all analysis, visualization, and export methods from \texttt{ComboTile} unchanged. \texttt{LunarTile} overrides \texttt{get\_lon\_lat}, \texttt{compute\_gradient}, \texttt{plot\_map}, and \texttt{max\_elev\_enu}, while reusing \texttt{xy\_to\_lonlat}, \texttt{lonlat\_to\_xy}, \texttt{tile\_bounds}, \texttt{compute\_slope}, \texttt{plot\_slope}, \texttt{save\_data}, and the internal binning helper \texttt{\_bin\_azimuth\_max}.
+
+\section{\texttt{ComboTile} --- Core Earth Terrain Mosaic}
+
+\subsection{Constructor}
+\begin{lstlisting}
+ComboTile(line, root_dir="", grid_size=5, center=None, verbose=True)
+\end{lstlisting}
+\begin{itemize}
+  \item \texttt{line} (\texttt{str}): Center coordinate string formatted as \texttt{"LAT DIR / LON DIR"}, e.g.\ \texttt{"79 N / 91 W"} or \texttt{"037 N/137 E"}.
+  \item \texttt{root\_dir} (\texttt{str}): Directory containing \texttt{ALPSMLC30\_*\_DSM.tif} files.
+  \item \texttt{grid\_size} (\texttt{int}): Square tile-grid width (default \texttt{5}, giving a $5\times 5$ mosaic).
+  \item \texttt{center} (\texttt{list | None}): Deprecated and ignored; retained for backwards call compatibility. \texttt{self.center} is always computed as the midpoint of the merged raster bounds.
+  \item \texttt{verbose} (\texttt{bool}): Prints tile loading summary, CRS, shape, and midpoint.
+\end{itemize}
+The constructor enumerates surrounding tiles via \texttt{surrounding\_tiles}, opens all existing files, merges them with \texttt{rasterio.merge.merge}, closes all open file handles in a \texttt{finally} block, and stores \texttt{self.elevations}, \texttt{self.transform}, \texttt{self.shape}, \texttt{self.crs}, \texttt{self.nodata}, and \texttt{self.center}. If no matching tiles exist, it raises \texttt{FileNotFoundError}.
+
+\subsection{Coordinate and Bounds Utilities}
+\begin{itemize}
+  \item \textbf{\texttt{surrounding\_tiles(lat\_center, lon\_center, tile\_size=1.0, grid\_size=5)}}: Returns a list of integer \texttt{(lat, lon)} pairs spanning a \texttt{grid\_size} $\times$ \texttt{grid\_size} grid centered on \texttt{(lat\_center, lon\_center)}.
+  \item \textbf{\texttt{get\_lon\_lat()}}: Returns two 2-D NumPy arrays \texttt{(lon, lat)} in degrees giving the geographic coordinates of every pixel center via \texttt{rasterio.transform.xy}.
+  \item \textbf{\texttt{xy\_to\_lonlat(x, y)}}: Converts pixel column/row \texttt{(x, y)} to \texttt{(lon, lat)} degrees.
+  \item \textbf{\texttt{lonlat\_to\_xy(lon, lat)}}: Converts geographic \texttt{(lon, lat)} degrees to pixel \texttt{(col, row)}.
+  \item \textbf{\texttt{tile\_bounds()}}: Returns \texttt{(min\_lon, max\_lon, min\_lat, max\_lat)} across the four raster corners.
+  \item \textbf{\texttt{get\_elevation(row, col)}}: Returns a 3-element \texttt{np.ndarray} \texttt{[lat, lon, elev]} for pixel \texttt{(row, col)}.
+\end{itemize}
+
+\subsection{Gradient, Slope, and Visualization}
+\begin{itemize}
+  \item \textbf{\texttt{compute\_gradient()}}: Converts pixel spacing from degrees to meters using Earth's mean equatorial scaling ($111{,}320\,\text{m/deg}$) evaluated at the tile's center latitude $\bar{\phi}$:
+  \begin{equation}
+    \Delta x_{\mathrm{m}} = 111{,}320 \cos(\bar{\phi}) \, |\Delta\lambda_{\mathrm{deg}}|, \qquad
+    \Delta y_{\mathrm{m}} = 111{,}320 \, |\Delta\phi_{\mathrm{deg}}|.
+  \end{equation}
+  Replaces \texttt{nodata} pixels with \texttt{NaN} before applying \texttt{numpy.gradient} and returns \texttt{(grad\_x, grad\_y)} in $\mathrm{m\,m^{-1}}$.
+  \item \textbf{\texttt{compute\_slope()}}: Calls \texttt{compute\_gradient()} and computes slope magnitude $\|\nabla z\| = \sqrt{(\partial z/\partial x)^2 + (\partial z/\partial y)^2}$ and slope angle $\alpha = \arctan(\|\nabla z\|)$ in degrees. Returns \texttt{(grad\_x, grad\_y, slope, slope\_deg)}.
+  \item \textbf{\texttt{plot\_map(ax=None)}}: Masks \texttt{nodata} pixels and renders the elevation raster with \texttt{rasterio.plot.show} using the \texttt{plasma} colormap. Returns \texttt{(fig, ax)}.
+  \item \textbf{\texttt{plot\_slope(want\_log=False, ax=None, vmax=15.0)}}: Renders terrain slope angles in degrees using the \texttt{inferno} colormap (linear $[0, \texttt{vmax}]$ or logarithmic \texttt{LogNorm}). Returns \texttt{(fig, ax)}.
+\end{itemize}
+
+\subsection{Data Export}
+\begin{itemize}
+  \item \textbf{\texttt{map\_table(want\_grad=False)}}: Returns an $(N, 3)$ array \texttt{[lat, lon, elev]} when \texttt{want\_grad=False}, or an $(N, 7)$ array \texttt{[lat, lon, elev, grad\_x, grad\_y, slope, slope\_deg]} when \texttt{want\_grad=True}.
+  \item \textbf{\texttt{save\_data(file\_name, compute\_gradients=True)}}: Builds a \texttt{TerrainData} object and writes it to a compressed HDF5 file at \texttt{file\_name}.
+\end{itemize}
+
+\subsection{ENU Horizon Analysis: \texttt{max\_elev\_enu}}
+\begin{lstlisting}
+az_centers, max_elev, max_r, max_z, max_coords = tile.max_elev_enu(
+    bin_width=10.0,
+    radius_max_meters=20000.0,
+    radius0_meters=200.0,
+    lon0=None,
+    lat0=None,
+    include_curvature=False,
+)
+\end{lstlisting}
+\begin{itemize}
+  \item \texttt{lon0, lat0} (\texttt{float}): Explicit observer longitude and latitude in degrees (raises \texttt{ValueError} if omitted).
+  \item \texttt{bin\_width} (\texttt{float}): Azimuth bin width in degrees (default \texttt{10.0}).
+  \item \texttt{radius\_max\_meters} (\texttt{float}): Maximum horizontal distance from the observer in meters (default \texttt{20000.0}).
+  \item \texttt{radius0\_meters} (\texttt{float}): Local neighborhood radius for interpolating the observer ground elevation \texttt{elref} (default \texttt{200.0}).
+  \item \texttt{include\_curvature} (\texttt{bool}): If \texttt{False} (default on Earth), uses flat height differences $dz = \mathrm{elev} - \mathrm{elref}$. If \texttt{True}, re-projects ENU with $h_0 = \mathrm{elref}$ and uses the 3-D ENU \texttt{up} component.
+  \item \textbf{Returns}: 5-tuple \texttt{(az\_centers, max\_elev, max\_r, max\_z, max\_coords)} containing bin centers $[0, \dots, 360]^\circ$, maximum horizon elevation angles (degrees), horizontal distances (meters), vertical offsets (meters), and \texttt{(lon, lat)} coordinates of each horizon peak. Empty bins contain \texttt{NaN}.
+\end{itemize}
+
+\section{\texttt{JTile} --- Single-File Earth DSM Tile}
+\begin{lstlisting}
+tile = JTile("079 N / 091 W", root_dir="Arctic_Data")
+# or directly by filename:
+tile = JTile("ALPSMLC30_N079W091_DSM.tif", root_dir="Arctic_Data")
+\end{lstlisting}
+Loads a single 1-degree ALOS GeoTIFF without mosaicking, storing \texttt{self.elevations}, \texttt{self.transform}, \texttt{self.nodata}, \texttt{self.crs}, \texttt{self.shape}, and \texttt{self.center}. All analysis, plotting, and export methods are inherited directly from \texttt{ComboTile}.
+
+\section{\texttt{LunarTile} --- Lunar DEM Tile}
+
+\subsection{Constructor}
+\begin{lstlisting}
+tile = LunarTile("lunar_9.62_-20.08.tif", root_dir="Lunar_Test_Data", verbose=True)
+\end{lstlisting}
+Expects filenames of the form \texttt{lunar\_\{LAT\}\_\{LON\}.tif}. Opens the GeoTIFF, stores \texttt{self.geo\_bounds}, pre-computes 2-D geographic grids \texttt{\_lon\_grid} and \texttt{\_lat\_grid}, sets \texttt{self.lunar\_radius = 1\_737\_400.0}\,m, and records \texttt{self.geo\_resolution} in degrees/pixel.
+
+\subsection{Overridden Methods}
+\begin{itemize}
+  \item \textbf{\texttt{get\_lon\_lat()}}: Returns pre-computed \texttt{(\_lon\_grid, \_lat\_grid)} in degrees.
+  \item \textbf{\texttt{compute\_gradient()}}: Scales degree pixel spacing using the lunar mean radius $R_{\text{moon}} = 1{,}737{,}400\,\text{m}$ at center latitude $\bar{\phi}$:
+  \begin{equation}
+    \Delta x_{\mathrm{m}} = \frac{\pi R_{\text{moon}}}{180} \cos(\bar{\phi}) \, |\Delta\lambda_{\mathrm{deg}}|, \qquad
+    \Delta y_{\mathrm{m}} = \frac{\pi R_{\text{moon}}}{180} \, |\Delta\phi_{\mathrm{deg}}|.
+  \end{equation}
+  \item \textbf{\texttt{plot\_map(ax=None)}}: Masks \texttt{nodata} values and plots via \texttt{matplotlib.axes.Axes.imshow} with geographic degree extents. Returns \texttt{(fig, ax)}.
+  \item \textbf{\texttt{max\_elev\_enu(...)}}:
+\end{itemize}
+\begin{lstlisting}
+el_deg, az_deg, az_centers, max_elev, max_r, max_z, max_coords = tile.max_elev_enu(
+    bin_width=10.0,
+    radius_max_meters=100000.0,
+    radius0_meters=1000.0,
+    radius_min_meters=500.0,
+    lon0=-20.08,
+    lat0=9.62,
+    include_curvature=True,
+    verbose=False,
+)
+\end{lstlisting}
+Uses the IAU Moon ellipsoid (\texttt{pm.Ellipsoid.from\_name("moon")}), estimates observer elevation via bilinear seed + linear \texttt{griddata} refinement, filters valid pixels with $r \in (\texttt{radius\_min\_meters}, \texttt{radius\_max\_meters}]$, and computes elevation angles using the 3-D ENU \texttt{up} component when \texttt{include\_curvature=True} (default) or flat differences $\mathrm{elev} - \mathrm{elref}$ when \texttt{include\_curvature=False}. Returns a 7-tuple adding per-pixel \texttt{el\_deg} and \texttt{az\_deg} ahead of the 5 binned arrays.
+
+\section{\texttt{TerrainData} and \texttt{JAXA\_Scrape}}
+
+\subsection{\texttt{TerrainData} (\texttt{TerrainData.py})}
+\begin{itemize}
+  \item \textbf{\texttt{TerrainData(lats, lons, elev, grad\_x, grad\_y, slope, slope\_deg, shape=None)}}: Stores the seven 2-D arrays.
+  \item \textbf{\texttt{save\_to\_h5(file\_name, dtype=np.float32, compression="gzip", compression\_opts=6)}}: Flattens and stacks the arrays into an $(N, 7)$ chunked HDF5 dataset \texttt{"terrain\_data"} with metadata attributes \texttt{headers}, \texttt{rows}, and \texttt{cols}.
+  \item \textbf{\texttt{TerrainData.load\_terrain\_data(file\_name)}}: Static method that reconstructs a \texttt{TerrainData} object with 2-D NumPy arrays from an HDF5 file.
+  \item \textbf{Getters}: \texttt{get\_latitudes()}, \texttt{get\_longitudes()}, \texttt{get\_elevation()}, \texttt{get\_gradient\_x()}, \texttt{get\_gradient\_y()}, \texttt{get\_slope()}, \texttt{get\_slope\_deg()}.
+\end{itemize}
+
+\subsection{\texttt{JAXA\_Scrape.py}}
+Provides three functions and a CLI entry point (\texttt{python JAXA\_Scrape.py --output-dir ALOS\_Data}):
+\begin{itemize}
+  \item \textbf{\texttt{scrape(download\_folder="ALOS\_Data")}}: Launches Chrome via Selenium to navigate the JAXA AW3D30 tile map and trigger tile zip downloads (after manual JAXA login if prompted).
+  \item \textbf{\texttt{extract\_zips(download\_folder="ALOS\_Data")}}: Extracts downloaded \texttt{.zip} archives and deletes the zip files.
+  \item \textbf{\texttt{extract\_dsm(download\_folder="ALOS\_Data")}}: Moves \texttt{*\_DSM.tif} rasters into \texttt{download\_folder} and cleans up extracted subdirectories.
+\end{itemize}
+
+\section{Key Algorithms}
+
+\subsection{ENU Frame Transformation}
+\texttt{pymap3d.geodetic2enu} converts geodetic coordinates $(\phi, \lambda, h)$ on the chosen reference ellipsoid to the local East-North-Up frame centered at $(\phi_0, \lambda_0, h_0)$:
+\begin{equation}
+  \begin{pmatrix} E \\ N \\ U \end{pmatrix}
+  = \mathbf{R}_{\mathrm{ENU}}(\phi_0, \lambda_0)
+  \left[ \mathbf{r}_{\mathrm{ECEF}}(\phi, \lambda, h) - \mathbf{r}_{\mathrm{ECEF}}(\phi_0, \lambda_0, h_0) \right].
+\end{equation}
+Horizontal range is $r = \sqrt{E^2 + N^2}$ and North-zero, East-positive azimuth is $\theta = \operatorname{atan2}(E, N) \in [-180^\circ, 180^\circ]$.
+
+\subsection{Observer Reference Elevation}
+To avoid discretization jumps at the observer pixel:
+\begin{itemize}
+  \item \textbf{Earth (\texttt{ComboTile})}: Computes ENU at $h_0=0$ and applies cubic \texttt{scipy.interpolate.griddata} over valid pixels within \texttt{radius0\_meters} (default 200\,m), falling back to median or nearest valid pixel.
+  \item \textbf{Moon (\texttt{LunarTile})}: Computes a 4-corner bilinear seed $h_{\mathrm{seed}}$ at fractional pixel offsets $(dc, dr)$, transforms to a seed ENU frame, and refines \texttt{elref} with linear \texttt{griddata} within \texttt{radius0\_meters} (default 1000\,m).
+\end{itemize}
+
+\subsection{Azimuth Binning and Wraparound}
+Per-pixel elevation angles $\epsilon_i = \operatorname{atan2}(dz_i, r_i)$ and azimuths $\theta_i \in [-180^\circ, 180^\circ]$ are duplicated with $\theta_i + 360^\circ$ so bins centered at $0^\circ$ and $360^\circ$ span $[-w/2, +w/2)$ and $[360^\circ - w/2, 360^\circ + w/2)$ seamlessly without wraparound seams. Within each bin of width $w$, the pixel maximizing $\epsilon_i$ is recorded along with its range $r$, vertical offset $dz$, and geographic coordinate \texttt{(lon, lat)}.
+
+\subsection{3-D Ellipsoidal Curvature in ENU}
+Because \texttt{geodetic2enu} transforms 3-D ECEF positions into the observer's local tangent plane at $h_0 = \mathrm{elref}$, the vertical coordinate $U$ naturally reflects the downward curvature of the body relative to the tangent plane:
+\begin{equation}
+  U \approx (h - h_{\mathrm{ref}}) - \frac{r^2}{2R}.
+\end{equation}
+Thus, passing \texttt{elref} as $h_0$ and setting $dz = U$ directly yields the true straight-line horizon angle over a curved ellipsoid, without an extra approximate term (and adding $+r^2/(2R)$ to $U$ would cancel the curvature back to a flat plane).
+
+\section{How to Download and Access Data}
+
+\subsection{Lunar DEM --- USGS LRO WAC GLD100 (100\,m/pixel)}
+The global LRO WAC Global Lunar DTM (GLD100) mosaic is hosted publicly over HTTP by USGS Astrogeology (\url{https://astrogeology.usgs.gov/search/map/moon_lroc_wac_dtm_gld100_118m}). Any geographic subset can be streamed and clipped with a single \texttt{gdalwarp} command without downloading the full global file:
+
+\begin{lstlisting}[language=bash]
+gdalwarp \
+  -te -22.58 7.12 -17.58 12.12 \
+  -te_srs "+proj=longlat +a=1737400 +b=1737400 +no_defs" \
+  -t_srs "+proj=longlat +a=1737400 +b=1737400 +no_defs" \
+  /vsicurl/https://planetarymaps.usgs.gov/mosaic/Lunar_LRO_WAC_GLD100_DTM_79S79N_100m_v1.1.tif \
+  Lunar_Test_Data/lunar_9.62_-20.08.tif
+\end{lstlisting}
+
+\begin{itemize}
+  \item \texttt{-te xmin ymin xmax ymax}: Geographic bounding box in degrees (here a $5^\circ \times 5^\circ$ box centered on Copernicus Crater at $9.62^\circ\text{N}, -20.08^\circ\text{E}$).
+  \item \texttt{-te\_srs} and \texttt{-t\_srs}: Inline lunar spherical CRS ($a = b = 1{,}737{,}400\,\text{m}$) matching the USGS mosaic's body-fixed sphere.
+  \item \texttt{/vsicurl/...}: GDAL HTTP range-request streaming; only intersecting tiles are transferred.
+  \item Output path: Name files \texttt{lunar\_\{LAT\}\_\{LON\}.tif} so \texttt{LunarTile} can validate center coordinates.
+\end{itemize}
+
+\subsection{Earth DEM --- ALOS World 3D 30\,m (AW3D30)}
+\texttt{ComboTile} and \texttt{JTile} read 1-degree tiles named \texttt{ALPSMLC30\_\{N|S\}\{LAT\}\{E|W\}\{LON\}\_DSM.tif}.
+
+\paragraph{Option A: JAXA Portal (Free Registration).}
+\begin{enumerate}
+  \item Register at \url{https://www.eorc.jaxa.jp/ALOS/en/dataset/aw3d30/aw3d30_e.htm}.
+  \item Download the 1-degree zip archives covering your target $5\times 5$ grid (for example, centered at \texttt{79 N / 91 W}, download \texttt{N077}--\texttt{N081} and \texttt{W089}--\texttt{W093}), or automate browser clicks and extraction with \texttt{python JAXA\_Scrape.py --output-dir ALOS\_Data}.
+  \item Place the extracted \texttt{*\_DSM.tif} files into one directory and pass that directory as \texttt{root\_dir}. Missing ocean/edge tiles are skipped with a warning and masked as \texttt{nodata}.
+\end{enumerate}
+
+\paragraph{Option B: OpenTopography S3 Mirror.}
+Individual AW3D30 tiles can also be fetched via the AWS CLI from OpenTopography's requester-pays bucket:
+\begin{lstlisting}[language=bash]
+aws s3 ls s3://raster/AW3D30/ \
+  --endpoint-url https://opentopography.s3.sdsc.edu --no-sign-request
+
+aws s3 cp s3://raster/AW3D30/N037/ALPSMLC30_N037E137_DSM.tif ./ALOS_Data/ \
+  --endpoint-url https://opentopography.s3.sdsc.edu --no-sign-request
+\end{lstlisting}
+
+\section{Dependencies and Testing}
+Core dependencies are listed in \texttt{requirements.txt}: \texttt{numpy}, \texttt{rasterio}, \texttt{matplotlib}, \texttt{pymap3d>=3.0}, \texttt{scipy}, \texttt{h5py}, and \texttt{jupyter}. On \texttt{pymap3d < 3.0}, \texttt{ComboTile.py} automatically falls back to a custom ellipsoid definition:
+\begin{lstlisting}
+pm.Ellipsoid(semimajor_axis=1738100.0, semiminor_axis=1736000.0, name="Moon IAU 2015")
+\end{lstlisting}
+Run \texttt{python -m unittest discover -s tests -v} to execute unit and integration checks across synthetic rasters, \texttt{Arctic\_Data/}, and \texttt{Lunar\_Test\_Data/}.
+
+\appendix
+\section{Earth vs. Moon: Computational Differences}
+Although \texttt{ComboTile} and \texttt{LunarTile} share a common API, physical scale, data packaging, and baseline length introduce seven important differences.
+
+\subsection{Reference Body and Ellipsoid Parameters}
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Earth (WGS-84 / GRS-80)} & \textbf{Moon (IAU 2015)} \\
+\midrule
+Equatorial radius $a$ & $6{,}378{,}137\,\text{m}$ & $1{,}738{,}100\,\text{m}$ \\
+Polar radius $b$ & $6{,}356{,}752.3\,\text{m}$ & $1{,}736{,}000\,\text{m}$ \\
+Mean spherical radius $R$ & $6{,}371{,}000\,\text{m}$ & $1{,}737{,}400\,\text{m}$ \\
+Flattening $f$ & $1/298.257$ & $\approx 1/825$ \\
+\texttt{pymap3d} ellipsoid & Default (\texttt{wgs84}) & \texttt{pm.Ellipsoid.from\_name("moon")} \\
+\bottomrule
+\end{tabular}
+\end{center}
+Passing the Moon ellipsoid to \texttt{geodetic2enu} is essential: at 100\,km horizontal range, using Earth's ellipsoid would misplace ENU coordinates and curvature drops by roughly a factor of $3.67$.
+
+\subsection{Degree-to-Meter Scaling in \texttt{compute\_gradient}}
+\begin{itemize}
+  \item \textbf{Earth (\texttt{ComboTile})}: Uses $111{,}320\,\text{m\,deg}^{-1}$ ($\Delta x_{\mathrm{m}} = 111{,}320 \cos(\bar{\phi})|\Delta\lambda_{\mathrm{deg}}|$, $\Delta y_{\mathrm{m}} = 111{,}320|\Delta\phi_{\mathrm{deg}}|$).
+  \item \textbf{Moon (\texttt{LunarTile})}: Uses $\pi R_{\text{moon}}/180 \approx 30{,}323\,\text{m\,deg}^{-1}$ ($\approx 27\%$ of Earth's scaling) with $R_{\text{moon}} = 1{,}737{,}400\,\text{m}$.
+\end{itemize}
+
+\subsection{Input Data Structure and Plotting}
+\begin{itemize}
+  \item \textbf{Earth}: \texttt{ComboTile} merges up to 25 1-degree ALOS GeoTIFFs ($\sim 30\,\text{m}$ spacing; at high latitudes such as $79^\circ\text{N}$, ALOS tiles store $3600\times 1200$ rectangular pixels in longitude). Plots use \texttt{rasterio.plot.show}.
+  \item \textbf{Moon}: \texttt{LunarTile} loads a single pre-clipped USGS GLD100 GeoTIFF ($\sim 100\,\text{m}$ spacing, $0.003298^\circ/\text{px}$), pre-caches coordinate grids \texttt{\_lon\_grid} and \texttt{\_lat\_grid}, and renders via \texttt{matplotlib.axes.Axes.imshow} with geographic extents.
+\end{itemize}
+
+\subsection{Observer Reference Elevation Interpolation}
+\begin{center}
+\begin{tabular}{@{}p{3.6cm}p{5.5cm}p{5.5cm}@{}}
+\toprule
+\textbf{Stage} & \textbf{Earth (\texttt{ComboTile})} & \textbf{Moon (\texttt{LunarTile})} \\
+\midrule
+Initial ENU / Seed & Compute ENU at $h_0=0\,\text{m}$ directly. & 4-corner bilinear seed $h_{\mathrm{seed}}$; compute seed ENU at $h_{\mathrm{seed}}$. \\
+Neighborhood radius & \texttt{radius0\_meters = 200.0}\,m & \texttt{radius0\_meters = 1000.0}\,m \\
+Refinement method & Cubic \texttt{griddata} ($\ge 4$ valid points), else median or nearest valid pixel. & Linear \texttt{griddata} ($\ge 3$ valid points), else fallback to bilinear seed $h_{\mathrm{seed}}$. \\
+\bottomrule
+\end{tabular}
+\end{center}
+The Moon uses a bilinear seed and larger neighborhood radius because 100\,m GLD100 pixels are coarser than 30\,m ALOS pixels and the observer typically lies inside a single grid cell.
+
+\subsection{Curvature Treatment and Default Analysis Radius}
+Over horizontal baseline $r$, a spherical surface drops below the observer's tangent plane by $\Delta z_{\mathrm{curv}} \approx r^2 / (2R)$:
+\begin{center}
+\begin{tabular}{@{}rrr@{}}
+\toprule
+\textbf{Baseline $r$} & \textbf{Earth ($R = 6{,}371\,\text{km}$)} & \textbf{Moon ($R = 1{,}737.4\,\text{km}$)} \\
+\midrule
+$10\,\text{km}$ & $7.8\,\text{m}$ ($0.045^\circ$) & $28.8\,\text{m}$ ($0.165^\circ$) \\
+$20\,\text{km}$ & $31.4\,\text{m}$ ($0.090^\circ$) & $115.1\,\text{m}$ ($0.330^\circ$) \\
+$50\,\text{km}$ & $196.2\,\text{m}$ ($0.225^\circ$) & $719.5\,\text{m}$ ($0.824^\circ$) \\
+$100\,\text{km}$ & $784.8\,\text{m}$ ($0.450^\circ$) & $2{,}877.9\,\text{m}$ ($1.648^\circ$) \\
+\bottomrule
+\end{tabular}
+\end{center}
+\begin{itemize}
+  \item \textbf{Earth (\texttt{ComboTile.max\_elev\_enu})}: Default \texttt{radius\_max\_meters} is \texttt{20000.0} and \texttt{include\_curvature} is \texttt{False}, using $dz = \mathrm{elev} - \mathrm{elref}$ (error $< 0.09^\circ$ at 20\,km; matches flat-tangent reference scripts). Setting \texttt{include\_curvature=True} switches to the exact WGS-84 ENU \texttt{up} component.
+  \item \textbf{Moon (\texttt{LunarTile.max\_elev\_enu})}: Default \texttt{radius\_max\_meters} is \texttt{100000.0} and \texttt{include\_curvature} is \texttt{True}, using $dz = U$ directly from \texttt{geodetic2enu} with $h_0=\mathrm{elref}$ and \texttt{ell=lunar\_ellipsoid}. At 100\,km, omitting curvature introduces a $\sim 2.88\,\text{km}$ ($\sim 1.65^\circ$) bias in apparent horizon height.
+\end{itemize}
+
+\subsection{Minimum Radius Guard}
+\texttt{ComboTile.max\_elev\_enu} excludes only the origin pixel ($r > 0\,\text{m}$), whereas \texttt{LunarTile.max\_elev\_enu} defaults to \texttt{radius\_min\_meters = 500.0}\,m ($r > 500\,\text{m}$) so coarse 100\,m immediate neighbors cannot dominate near-field azimuth bins with steep discretization angles.
+
+\subsection{\texttt{max\_elev\_enu} Return Signatures}
+\begin{itemize}
+  \item \textbf{\texttt{ComboTile}}: Returns the 5-tuple \texttt{(az\_centers, max\_elev, max\_r, max\_z, max\_coords)}.
+  \item \textbf{\texttt{LunarTile}}: Returns the 7-tuple \texttt{(el\_deg, az\_deg, az\_centers, max\_elev, max\_r, max\_z, max\_coords)}, prepending the raw per-pixel elevation and azimuth arrays for scatter diagnostics.
+\end{itemize}
+
+\end{document}

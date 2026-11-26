@@ -1,240 +1,308 @@
-import rasterio
-import rasterio.features
-import rasterio.transform
-import numpy as np
+import os
+from typing import Optional, Tuple
+
 import matplotlib.pyplot as plt
-from rasterio.transform import xy, rowcol
-import pandas as pd
-from rasterio.plot import show
-from rasterio.merge import merge 
-import h5py
 from matplotlib.colors import LogNorm
+import numpy as np
+import pymap3d as pm
+import rasterio
+from rasterio.merge import merge
+from rasterio.plot import show
+from rasterio.transform import rowcol, xy
+import scipy.interpolate as spi
 
-class ComboTile():
-    def __init__(self, line, root_dir = '', center = []):
-        # TODO: integrate functionality for just typing with a print statement; add error handling for if tile does not exist
-        #coords = input("Enter a coordinate center with convention 000.000 S/000.000 W: ")
-        lat_coord, lon_coord = line.split('/')
-        lat_deg, lat_direction = lat_coord.split()
-        lon_deg, lon_direction = lon_coord.split()
-        #self.center = (lat_deg, lat_direction, lon_deg, lon_direction)
-        
-        if center:
-            self.center = (center[0], center[1])
-        else:
-            self.center = (float(lon_deg), float(lat_deg))
 
-        degree_combinations = self.surrounding_tiles(float(lat_deg), float(lon_deg))
-        print(degree_combinations)
-        file_paths = [f"{root_dir}/ALPSMLC30_{lat_direction}{combo[0]:03d}{lon_direction}{combo[1]:03d}_DSM.tif" for combo in degree_combinations]
+def _get_lunar_ellipsoid() -> pm.Ellipsoid:
+    """Return the IAU Moon reference ellipsoid, compatible across pymap3d versions."""
+    try:
+        return pm.Ellipsoid.from_name("moon")
+    except (AttributeError, KeyError, ValueError):
+        return pm.Ellipsoid(
+            semimajor_axis=1738100.0,
+            semiminor_axis=1736000.0,
+            name="Moon IAU 2015",
+        )
+
+
+class ComboTile:
+    """Mosaic and analyze a grid of ALOS World 3D 30 m (AW3D30) GeoTIFF DSM tiles."""
+
+    EARTH_MEAN_RADIUS_M = 6_371_000.0
+    METERS_PER_DEG_EARTH = 111_320.0
+
+    def __init__(
+        self,
+        line: str,
+        root_dir: str = "",
+        grid_size: int = 5,
+        center: Optional[list] = None,
+        verbose: bool = True,
+    ):
+        """
+        Load and merge a grid of ALOS DSM tiles centered on a coordinate string.
+
+        Parameters
+        ----------
+        line : str
+            Center coordinate string in ``"LAT DIR / LON DIR"`` format,
+            e.g. ``"79 N / 91 W"`` or ``"037 N/137 E"``.
+        root_dir : str, optional
+            Directory containing ``ALPSMLC30_*_DSM.tif`` files.
+        grid_size : int, optional
+            Side length (in 1-degree tiles) of the square mosaic grid (default 5).
+        center : list, optional
+            Deprecated and ignored; retained only for backwards compatibility.
+            ``self.center`` is always derived from the merged raster bounds.
+        verbose : bool, optional
+            If True, print loaded/missing tile summaries and CRS info.
+        """
+        _ = center  # retained for backwards call compatibility
+        try:
+            lat_coord, lon_coord = line.split("/")
+            lat_deg_str, lat_direction = lat_coord.strip().split()
+            lon_deg_str, lon_direction = lon_coord.strip().split()
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid coordinate string {line!r}. Expected format 'LAT DIR / LON DIR', e.g. '79 N / 91 W'."
+            ) from exc
+
+        lat_direction = lat_direction.upper()
+        lon_direction = lon_direction.upper()
+        degree_combinations = self.surrounding_tiles(
+            float(lat_deg_str), float(lon_deg_str), grid_size=grid_size
+        )
+
+        file_paths = [
+            os.path.join(
+                root_dir,
+                f"ALPSMLC30_{lat_direction}{lat_i:03d}{lon_direction}{lon_i:03d}_DSM.tif",
+            )
+            if root_dir
+            else f"ALPSMLC30_{lat_direction}{lat_i:03d}{lon_direction}{lon_i:03d}_DSM.tif"
+            for lat_i, lon_i in degree_combinations
+        ]
 
         src_files_to_mosaic = []
         failed_files = []
         successful_files = []
 
-        for file_path in file_paths:  
+        for file_path in file_paths:
             try:
                 src = rasterio.open(file_path)
                 src_files_to_mosaic.append(src)
                 successful_files.append(file_path)
             except FileNotFoundError:
                 failed_files.append((file_path, "File not found"))
-                print(f"Warning: Could not find {file_path}")
-            except Exception as e:
-                failed_files.append((file_path, str(e)))
-                print(f"Warning: Failed to open {file_path}: {e}")
+            except Exception as exc:
+                failed_files.append((file_path, str(exc)))
 
-        if successful_files:
-            print(f"\n{len(successful_files)} file(s) successfully opened:")
-            for file_path in successful_files:
-                print(f"  - {file_path}")
+        if verbose:
+            if successful_files:
+                print(f"{len(successful_files)} file(s) successfully opened.")
+            if failed_files:
+                print(f"{len(failed_files)} file(s) missing or failed to open:")
+                for file_path, error in failed_files:
+                    print(f"  - {file_path}: {error}")
 
-        if failed_files:
-            print(f"\n{len(failed_files)} file(s) failed to open:")
-            for file_path, error in failed_files:
-                print(f"  - {file_path}: {error}")
+        if not src_files_to_mosaic:
+            raise FileNotFoundError(
+                f"No DSM tiles could be opened for {line!r} in {root_dir!r}."
+            )
 
-        self.mosaic, self.transform = merge(src_files_to_mosaic)
-        self.elevations = self.mosaic[0]
-        self.shape = self.mosaic[0].shape
+        try:
+            mosaic, self.transform = merge(src_files_to_mosaic)
+            self.crs = src_files_to_mosaic[0].crs
+            self.nodata = src_files_to_mosaic[0].nodata
+        finally:
+            for src in src_files_to_mosaic:
+                src.close()
 
-    def get_lon_lat(self):
-        '''lat = y, lon = x'''
+        self.elevations = mosaic[0]
+        self.shape = self.elevations.shape
+
+        rows, cols = self.shape
+        tl = xy(self.transform, 0, 0)
+        br = xy(self.transform, rows - 1, cols - 1)
+        self.center = ((tl[0] + br[0]) / 2.0, (tl[1] + br[1]) / 2.0)  # (lon, lat)
+
+        if verbose:
+            print(f"CRS: {self.crs}, Shape: {self.shape}, Center (lon, lat): {self.center}")
+
+    def _masked_elevations(self) -> np.ndarray:
+        """Return elevation array as float with nodata values replaced by NaN."""
+        elev = self.elevations.astype(float, copy=True)
+        if self.nodata is not None:
+            elev[elev == self.nodata] = np.nan
+        return elev
+
+    def _valid_mask(self, elev_flat: np.ndarray) -> np.ndarray:
+        """Return a boolean mask of finite, non-nodata elevation samples."""
+        valid = np.isfinite(elev_flat)
+        if self.nodata is not None:
+            valid &= elev_flat != float(self.nodata)
+        return valid
+
+    def get_lon_lat(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return 2-D arrays ``(lon, lat)`` in degrees for every pixel center."""
         rows, cols = self.elevations.shape
-
-        # Arrays of row indices and column indices
         row_idx = np.arange(rows)
         col_idx = np.arange(cols)
-        
-        # Create 2D meshgrid
         row_grid, col_grid = np.meshgrid(row_idx, col_idx, indexing="ij")
-        
-        # Use rasterio.transform.xy to convert all pixel centers
         lon, lat = xy(self.transform, row_grid, col_grid)
-        
-        return lon, lat
-    
-    def xy_to_lonlat(self, x, y):  # x=col, y=row
-        return xy(self.transform, y, x)  
-    
-    def lonlat_to_xy(self, lon, lat):
+        return np.asarray(lon), np.asarray(lat)
+
+    def xy_to_lonlat(self, x: int, y: int) -> Tuple[float, float]:
+        """Convert pixel coordinates ``(col, row)`` to geographic ``(lon, lat)``."""
+        return xy(self.transform, y, x)
+
+    def lonlat_to_xy(self, lon: float, lat: float) -> Tuple[int, int]:
+        """Convert geographic coordinates ``(lon, lat)`` to pixel ``(col, row)``."""
         row, col = rowcol(self.transform, lon, lat)
-        return col, row  
+        return col, row
 
-
-
-    def surrounding_tiles(self, lat_center, lon_center, tile_size=1.0, grid_size=5):
-        """Return an array of (lat, lon) pairs for a grid of surrounding tiles."""
+    def surrounding_tiles(
+        self,
+        lat_center: float,
+        lon_center: float,
+        tile_size: float = 1.0,
+        grid_size: int = 5,
+    ):
+        """Return a list of integer ``(lat, lon)`` tile pairs for a surrounding grid."""
         half = grid_size // 2
         offsets = np.arange(-half, half + 1) * tile_size
-
-        # Each combination of offset lat/lon
         latitudes = lat_center + offsets
         longitudes = lon_center + offsets
+        latlon_grid = np.stack(np.meshgrid(latitudes, longitudes, indexing="ij"), axis=-1)
+        return [tuple(pair) for pair in latlon_grid.astype(int).reshape(-1, 2)]
 
-        latlon_grid = np.stack(np.meshgrid(latitudes, longitudes, indexing='ij'), axis=-1)
-        # shape: (grid_size, grid_size, 2), where [:,:,0] = lat, [:,:,1] = lon
-
-        combos = [tuple(pair) for pair in latlon_grid.astype(int).reshape(-1, 2)]
-
-        return combos
-        
-    # returns the minimum and maximum bounds for the latitude and longitude
-    def tile_bounds(tile):
-        rows, cols = tile.shape
-
-        tl = xy(tile.transform, 0, 0)
-        tr = xy(tile.transform, 0, cols-1)
-        bl = xy(tile.transform, rows-1, 0)
-        br = xy(tile.transform, rows-1, cols-1)
-    
+    def tile_bounds(self) -> Tuple[float, float, float, float]:
+        """Return ``(min_lon, max_lon, min_lat, max_lat)`` for the raster."""
+        rows, cols = self.shape
+        tl = xy(self.transform, 0, 0)
+        tr = xy(self.transform, 0, cols - 1)
+        bl = xy(self.transform, rows - 1, 0)
+        br = xy(self.transform, rows - 1, cols - 1)
         lons = [tl[0], tr[0], bl[0], br[0]]
         lats = [tl[1], tr[1], bl[1], br[1]]
-        return min(lons), max(lons), min(lats), max(lats) 
-    
-    def get_elevation(self, row, col):
-        '''Returns the longitude, latitude, and elevation as a 3-element array for a specific tile object'''
+        return min(lons), max(lons), min(lats), max(lats)
+
+    def get_elevation(self, row: int, col: int) -> np.ndarray:
+        """Return ``np.array([lat, lon, elev])`` for a single pixel ``(row, col)``."""
         lon, lat = xy(self.transform, row, col)
         elev = self.elevations[row, col]
         return np.array([float(lat), float(lon), float(elev)])
-    
-    def map_table(self, want_grad: bool):
-        '''Uses vectorization to create a list of the latitude, longitude, and elevation for each pixel in the tile'''
-        rows, cols = np.indices(self.shape)
-        lons, lats = xy(self.transform, rows, cols)
 
-        if want_grad:
-            grad_x, grad_y, slope, slope_deg = self.compute_gradient()
-            return np.stack([
-                lats.flatten(),
-                lons.flatten(),
-                self.elevations.flatten(),
-                grad_x.flatten(),
-                grad_y.flatten(),
-                slope.flatten(),
-                slope_deg.flatten()
-            ], axis=1)
+    def compute_gradient(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Compute terrain elevation gradients ``(grad_x, grad_y)`` in m/m.
 
-        return np.stack([lats.flatten(), lons.flatten(), self.elevations.flatten()], axis = 1)
-        
-    def plot_map(self, ax=None):
-
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(8, 6))
-        else:
-            fig = ax.figure
-
-        # Show the raster on this axes
-        im = show(self.elevations, transform=self.transform, cmap='plasma', ax=ax)
-        # ADD: option for log_scal
-
-        # Grab the image object created by show
-        im = ax.images[0]  # THIS is the AxesImage
-
-        # Now attach the colorbar to the figure
-        cbar = fig.colorbar(ax.images[0], ax=ax, shrink=0.7)
-        cbar.set_label("Elevation (m)")
-
-        ax.set_title("Elevation Map")
-        ax.set_xlabel("Longitude")
-        ax.set_ylabel("Latitude")
-        
-    def compute_gradient(self):
-        dx_deg = self.transform.a
-        dy_deg = -self.transform.e  # make positive
-    
-        # Approximate pixel size in meters
-        # Use mean latitude of the tile for lon->meter scaling
-        nrows, ncols = self.elevations.shape
-        y0 = self.transform[3]
-        mean_lat = y0 - (nrows / 2) * dy_deg
+        Uses the spherical-Earth degree-to-meter scaling at the tile center latitude.
+        Nodata pixels are converted to NaN prior to differentiation.
+        """
+        dx_deg = abs(self.transform.a)
+        dy_deg = abs(self.transform.e)
+        mean_lat = self.center[1]
         lat_rad = np.radians(mean_lat)
 
-        dx_m = 111_320 * np.cos(lat_rad) * dx_deg
-        dy_m = 111_320 * dy_deg
+        dx_m = self.METERS_PER_DEG_EARTH * np.cos(lat_rad) * dx_deg
+        dy_m = self.METERS_PER_DEG_EARTH * dy_deg
 
-        # Compute gradients in meters
-        grad_y, grad_x = np.gradient(self.elevations, dy_m, dx_m)
-
-        # Slope magnitude and slope angle in degrees
-        #slope = np.sqrt(grad_x**2 + grad_y**2)
-        #slope_deg = np.degrees(np.arctan(slope))
-
+        elev = self._masked_elevations()
+        grad_y, grad_x = np.gradient(elev, dy_m, dx_m)
         return grad_x, grad_y
-        # should be 3D -> at a given elevation point, what is the tangent plane? 
-        # get quantities necessary to define a tangent plane at a given point (center and normal vector)
-        # NEED NORMAL VECTOR
 
-    def plot_slope(self, want_log: bool, ax=None):
-        """
-        Visualize slope angles (in degrees) at each pixel.
-        """
+    def compute_slope(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return ``(grad_x, grad_y, slope, slope_deg)`` over the raster."""
         grad_x, grad_y = self.compute_gradient()
-        slope = np.sqrt(grad_x**2 + grad_y**2)
+        slope = np.hypot(grad_x, grad_y)
         slope_deg = np.degrees(np.arctan(slope))
+        return grad_x, grad_y, slope, slope_deg
+
+    def map_table(self, want_grad: bool = False) -> np.ndarray:
+        """
+        Return a flattened ``(N, 3)`` or ``(N, 7)`` array of per-pixel attributes.
+
+        Columns are ``[lat, lon, elev]`` when ``want_grad=False``, or
+        ``[lat, lon, elev, grad_x, grad_y, slope, slope_deg]`` when ``want_grad=True``.
+        """
+        lons, lats = self.get_lon_lat()
+        elev = self._masked_elevations()
+
+        if want_grad:
+            grad_x, grad_y, slope, slope_deg = self.compute_slope()
+            return np.stack(
+                [
+                    lats.ravel(),
+                    lons.ravel(),
+                    elev.ravel(),
+                    grad_x.ravel(),
+                    grad_y.ravel(),
+                    slope.ravel(),
+                    slope_deg.ravel(),
+                ],
+                axis=1,
+            )
+
+        return np.stack([lats.ravel(), lons.ravel(), elev.ravel()], axis=1)
+
+    def plot_map(self, ax=None):
+        """Plot the elevation raster in geographic coordinates with nodata masked."""
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(8, 6))
+        else:
+            fig = ax.figure
+
+        masked_elev = np.ma.masked_invalid(self._masked_elevations())
+        show(masked_elev, transform=self.transform, cmap="plasma", ax=ax)
+
+        cbar = fig.colorbar(ax.images[0], ax=ax, shrink=0.7)
+        cbar.set_label("Elevation (m)")
+        ax.set_title("Elevation Map")
+        ax.set_xlabel("Longitude (degrees)")
+        ax.set_ylabel("Latitude (degrees)")
+        return fig, ax
+
+    def plot_slope(self, want_log: bool = False, ax=None, vmax: float = 15.0):
+        """Visualize terrain slope angles (in degrees) at each pixel."""
+        _, _, _, slope_deg = self.compute_slope()
+        masked_slope = np.ma.masked_invalid(slope_deg)
 
         if ax is None:
             fig, ax = plt.subplots(figsize=(8, 6))
         else:
             fig = ax.figure
-    
-        # Use rasterio.plot.show to display slope with transform
+
         if want_log:
-            im = show(
-                slope_deg,
-                transform=self.transform,
-                cmap='inferno',
-                norm=LogNorm(vmin=0.1, vmax=np.nanmax(slope_deg)),
-                ax=ax,
-                title="Slope Angle Map (degrees)"
-            )
+            max_slope = float(np.nanmax(slope_deg))
+            norm = LogNorm(vmin=0.1, vmax=max(max_slope, 0.2))
+            show(masked_slope, transform=self.transform, cmap="inferno", norm=norm, ax=ax)
         else:
-            im = show(
-                slope_deg,
+            show(
+                masked_slope,
                 transform=self.transform,
-                cmap='inferno',
-                vmin = 0, vmax = np.nanmax(15),
+                cmap="inferno",
+                vmin=0.0,
+                vmax=vmax,
                 ax=ax,
-                title="Slope Angle Map (degrees)"
-            )            
+            )
 
         cbar = fig.colorbar(ax.images[0], ax=ax, shrink=0.7)
         cbar.set_label("Slope (degrees)")
         ax.set_title("Slope Map")
-        ax.set_xlabel("Longitude")
-        ax.set_ylabel("Latitude")
+        ax.set_xlabel("Longitude (degrees)")
+        ax.set_ylabel("Latitude (degrees)")
+        return fig, ax
 
-    def save_data(self, file_name, compute_gradients=True):
-        """
-        Build a TerrainData object from this tile and save to an HDF5 file.
-        """
-        rows, cols = np.indices(self.shape)
-        lons, lats = xy(self.transform, rows, cols)
+    def save_data(self, file_name: str, compute_gradients: bool = True):
+        """Build a ``TerrainData`` object from this tile and save it to an HDF5 file."""
+        from TerrainData import TerrainData
 
+        lons, lats = self.get_lon_lat()
         if compute_gradients:
-            grad_x, grad_y, slope, slope_deg = self.compute_gradient()
+            grad_x, grad_y, slope, slope_deg = self.compute_slope()
         else:
-            grad_x = grad_y = slope = slope_deg = np.zeros_like(self.elevations)
+            zeros = np.zeros_like(self.elevations, dtype=float)
+            grad_x = grad_y = slope = slope_deg = zeros
 
         terrain = TerrainData(
             lats=lats,
@@ -244,179 +312,451 @@ class ComboTile():
             grad_y=grad_y,
             slope=slope,
             slope_deg=slope_deg,
-            shape=self.elevations.shape
+            shape=self.elevations.shape,
         )
-
         terrain.save_to_h5(file_name=file_name)
-       
-    def compute_azimuth(self):
-         
-         lon, lat = self.get_lon_lat() # x, y
-         clon, clat = self.center
 
-         meters_per_deg_lat = 111_320
-         meters_per_deg_lon = 111_320 * np.cos(np.radians(clat))
-        
-            
-         dlat = (lat - clat) * meters_per_deg_lat
-         dlon = (lon - clon) * meters_per_deg_lon # convert back to non-negative for JTile array
-            
-         theta = np.degrees(np.arctan2(dlon, dlat))  # arctan2(y, x)
-         theta = (theta + 360) % 360
-         r = np.sqrt(dlat**2 + dlon**2)
-            
-         return r, theta
-        
-    def max_per_bin_fast(self, bin_width = 0.01):
-        clon, clat = self.center
-        meters_per_deg_lat = 111_320
-        meters_per_deg_lon = 111_320 * np.cos(np.radians(clat))
-        
-        r, theta = self.compute_azimuth()
-        theta = theta % 360
-        center_x, center_y = self.lonlat_to_xy(lon = clon, lat = clat)
-        
-        print(center_x, center_y)
-        r = r.flatten()
-        theta = theta.flatten()
-        z = self.elevations.flatten() - self.elevations[int(center_y), int(center_x)]
-        print(z)
-        # elevations data
+    @staticmethod
+    def _estimate_reference_elevation(
+        east: np.ndarray,
+        north: np.ndarray,
+        elev_flat: np.ndarray,
+        valid_mask: np.ndarray,
+        radius0_meters: float,
+        method: str = "cubic",
+        fallback_value: Optional[float] = None,
+    ) -> float:
+        """Interpolate ground elevation at the observer origin ``(E=0, N=0)``."""
+        r = np.hypot(east, north)
+        m0 = valid_mask & (r <= radius0_meters)
+        min_pts = 4 if method == "cubic" else 3
 
-        bins = np.arange(0, 360 + bin_width/2, bin_width)
-        nbins = len(bins) - 1
-        
-        # Bin assignment
-        bin_idx = (theta // bin_width).astype(int)
+        if m0.sum() >= min_pts:
+            elref_raw = spi.griddata(
+                np.column_stack((east[m0], north[m0])),
+                elev_flat[m0],
+                np.array([[0.0, 0.0]]),
+                method=method,
+            )
+            elref = float(elref_raw[0])
+            if not np.isnan(elref):
+                return elref
+            if fallback_value is not None:
+                return float(fallback_value)
+            return float(np.median(elev_flat[m0]))
+        if m0.sum() > 0:
+            if fallback_value is not None:
+                return float(fallback_value)
+            return float(np.median(elev_flat[m0]))
+        if fallback_value is not None:
+            return float(fallback_value)
 
-        
-        bin_idx[bin_idx == nbins] = nbins - 1
-        print("Bin Index:", bin_idx)
-    
-        # validity
-        valid = (r > 0) & (bin_idx >= 0) & (bin_idx < nbins)
-        print("Validation:", valid)
-    
-        elev_angle = np.degrees(np.arctan2(z[valid], r[valid]))
-        print("Elevations angle: ", elev_angle)
-    
-        order = np.lexsort((-elev_angle, bin_idx[valid]))
-        # returns a sorted array of indices, sorted by angle in descending order (-) and by bins in increasing ordr
-        # data product looks like elevation angles sorted per bin, and bins are sorted
-        print("ordering index mask", order)
+        valid_r = np.where(valid_mask, r, np.inf)
+        return float(elev_flat[np.argmin(valid_r)])
 
-        
-        bin_sorted  = bin_idx[valid][order]
-        elev_sorted = elev_angle[order]
-        r_sorted = r[valid][order]
-        z_sorted = z[valid][order]
-        print('sorted elevations', elev_angle)
-    
-        # output
+    def _bin_azimuth_max(
+        self,
+        az_deg: np.ndarray,
+        el_deg: np.ndarray,
+        rm: np.ndarray,
+        dz: np.ndarray,
+        flat_idx: np.ndarray,
+        bin_width: float,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Bin per-pixel horizon angles by azimuth with 0/360 wraparound handling."""
+        az_ext = np.concatenate([az_deg, az_deg + 360.0])
+        el_ext = np.concatenate([el_deg, el_deg])
+        r_ext = np.concatenate([rm, rm])
+        z_ext = np.concatenate([dz, dz])
+        idx_ext = np.concatenate([flat_idx, flat_idx])
+
+        az_centers = np.arange(0.0, 360.0 + bin_width / 2.0, bin_width)
+        half = bin_width / 2.0
+        nbins = len(az_centers)
+
         max_elev = np.full(nbins, np.nan)
         max_r = np.full(nbins, np.nan)
         max_z = np.full(nbins, np.nan)
-        print('max elev length',len(max_elev))
-    
-        # first occurrence per bin = max elevation
-        _, first = np.unique(bin_sorted, return_index=True)
-        print('first', first)
-        max_elev[bin_sorted[first]] = elev_sorted[first]
-        max_r[bin_sorted[first]] = r_sorted[first]
-        max_z[bin_sorted[first]] = z_sorted[first]
-        print('elevation maxes',max_elev)
+        max_coords = np.full((nbins, 2), np.nan)
 
-        print(f"len(bin_sorted): {len(bin_sorted)}")
-        print(f"len(elev_sorted): {len(elev_sorted)}")
-        print(f"unique bins: {len(np.unique(bin_sorted))}")
+        ncols = self.elevations.shape[1]
+        for i, azc in enumerate(az_centers):
+            sel = (az_ext >= azc - half) & (az_ext < azc + half)
+            if not np.any(sel):
+                continue
 
-        # Get the original flattened indices of the max elevations
-        valid_indices = np.where(valid)[0]
-        max_indices = valid_indices[order[first]]
+            el_bin = el_ext[sel]
+            best = int(np.argmax(el_bin))
 
-        # Convert flattened indices back to 2D pixel coordinates (row, col)
-        rows = max_indices // self.elevations.shape[1]
-        cols = max_indices % self.elevations.shape[1]
+            max_elev[i] = el_bin[best]
+            max_r[i] = r_ext[sel][best]
+            max_z[i] = z_ext[sel][best]
 
-        # Convert pixel coordinates to lon/lat
-        max_coords = np.array([self.xy_to_lonlat(col, row) for col, row in zip(cols, rows)])
+            orig_flat = int(idx_ext[sel][best])
+            row_px = orig_flat // ncols
+            col_px = orig_flat % ncols
+            max_coords[i] = self.xy_to_lonlat(col_px, row_px)
 
-    
-        return max_elev, max_r, max_z, max_coords
+        return az_centers, max_elev, max_r, max_z, max_coords
 
-    def plot_max_per_bin(self, max_elev = [], max_r=[], max_z=[], bin_width=0.01):
+    def max_elev_enu(
+        self,
+        bin_width: float = 10.0,
+        radius_max_meters: float = 20000.0,
+        radius0_meters: float = 200.0,
+        lon0: Optional[float] = None,
+        lat0: Optional[float] = None,
+        include_curvature: bool = False,
+    ):
         """
-        Plot the outputs from max_per_bin_fast as subplots.
-        
-        Parameters:
-        - max_elev: elevation angles (degrees)
-        - max_r: radial distances (meters)
-        - max_z: normalized elevations (meters)
-        - bin_width: bin width in degrees (for x-axis)
-        """
-        if not max_elev or not max_r or not max_z:
-            max_elev, max_r, max_z, _ = self.max_per_bin_fast(bin_width)
+        Compute the azimuthal horizon elevation profile in the local ENU frame.
 
-        nbins = len(max_elev)
-        azimuths = np.arange(nbins) * bin_width
-        
-        fig, axes = plt.subplots(3, 1, figsize=(12, 10))
-        
-        # Elevation Angle
-        axes[0].plot(azimuths, max_elev, linewidth=1.5)
-        axes[0].set_ylabel("Elevation Angle (degrees)")
-        axes[0].set_title("Maximum Elevation Angle per Azimuth")
-        axes[0].grid(True, alpha=0.3)
-        axes[0].set_xlim(0, 360)
-        
-        # Radial Distance
-        axes[1].plot(azimuths, max_r, linewidth=1.5, color='orange')
-        axes[1].set_ylabel("Distance (meters)")
-        axes[1].set_title("Distance to Maximum Elevation Point per Azimuth")
-        axes[1].grid(True, alpha=0.3)
-        axes[1].set_xlim(0, 360)
-        
-        # Normalized Elevation (Z)
-        axes[2].plot(azimuths, max_z, linewidth=1.5, color='green')
-        axes[2].set_ylabel("Elevation Difference (meters)")
-        axes[2].set_xlabel("Azimuth (degrees)")
-        axes[2].set_title("Normalized Elevation (above center) per Azimuth")
-        axes[2].grid(True, alpha=0.3)
-        axes[2].set_xlim(0, 360)
-        
-        plt.tight_layout()
-        return fig, axes
+        Parameters
+        ----------
+        bin_width : float, optional
+            Azimuth bin width in degrees (default 10.0).
+        radius_max_meters : float, optional
+            Maximum horizontal radius from the observer in meters (default 20000).
+        radius0_meters : float, optional
+            Local neighborhood radius for observer elevation interpolation (default 200).
+        lon0, lat0 : float
+            Observer longitude and latitude in degrees (must be provided explicitly).
+        include_curvature : bool, optional
+            If True, use the 3-D ENU ``up`` coordinate relative to ``elref`` (which
+            includes Earth ellipsoid curvature). If False (default), use flat elevation
+            differences ``elev - elref`` for compatibility with short-baseline analyses.
+
+        Returns
+        -------
+        az_centers, max_elev, max_r, max_z, max_coords
+        """
+        if lon0 is None or lat0 is None:
+            raise ValueError(
+                "lon0 and lat0 must be provided explicitly. "
+                "self.center is the mosaic geometric midpoint and is unlikely "
+                "to be the intended observation site."
+            )
+
+        lon, lat = self.get_lon_lat()
+        lon_flat = np.asarray(lon).ravel()
+        lat_flat = np.asarray(lat).ravel()
+        elev_flat = self.elevations.ravel().astype(float)
+        valid_mask = self._valid_mask(elev_flat)
+
+        east, north, _ = pm.geodetic2enu(
+            lat_flat, lon_flat, elev_flat, lat0, lon0, 0.0
+        )
+        r = np.hypot(east, north)
+        elref = self._estimate_reference_elevation(
+            east, north, elev_flat, valid_mask, radius0_meters, method="cubic"
+        )
+
+        if include_curvature:
+            east, north, up = pm.geodetic2enu(
+                lat_flat, lon_flat, elev_flat, lat0, lon0, elref
+            )
+            r = np.hypot(east, north)
+            dz_all = up
+        else:
+            dz_all = elev_flat - elref
+
+        theta = np.degrees(np.arctan2(east, north))  # -180..+180, N=0°, E=+90°
+        mask = valid_mask & (r > 0) & (r <= radius_max_meters)
+        flat_idx = np.where(mask)[0]
+        dz = dz_all[mask]
+        rm = r[mask]
+        el_deg = np.degrees(np.arctan2(dz, rm))
+        az_deg = theta[mask]
+
+        return self._bin_azimuth_max(az_deg, el_deg, rm, dz, flat_idx, bin_width)
 
 
 class JTile(ComboTile):
-    def __init__(self, file_name, root_dir="ALOS_Data"):
-        """
-        Initialize JTile from a single DSM file.
-        """
-        print(file_name)
-        lat_coord, lon_coord = file_name.split('/')
-        
-        lat_deg, lat_direction = lat_coord.split()
-        lon_deg, lon_direction = lon_coord.split()
+    """Load and analyze a single ALOS World 3D 30 m GeoTIFF DSM file without mosaicking."""
 
-        self.center = (float(lat_deg), lat_direction, float(lon_deg), lon_direction)
+    def __init__(self, file_name: str, root_dir: str = "ALOS_Data"):
+        """
+        Initialize a JTile from a coordinate string or a DSM filename.
 
-        file_path = f"{root_dir}/ALPSMLC30_{lat_direction}{int(float(lat_deg)):03d}{lon_direction}{int(float(lon_deg)):03d}_DSM.tif"
-        
-        # Open the raster file
+        Parameters
+        ----------
+        file_name : str
+            Either ``"LAT DIR / LON DIR"`` (e.g. ``"079 N / 091 W"``) or a direct
+            ``.tif`` filename (e.g. ``"ALPSMLC30_N079W091_DSM.tif"``).
+        root_dir : str, optional
+            Directory containing the DSM file (default ``"ALOS_Data"``).
+        """
+        if file_name.lower().endswith(".tif"):
+            tif_name = file_name
+        else:
+            try:
+                lat_coord, lon_coord = file_name.split("/")
+                lat_deg, lat_direction = lat_coord.strip().split()
+                lon_deg, lon_direction = lon_coord.strip().split()
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid coordinate or filename {file_name!r}."
+                ) from exc
+            tif_name = (
+                f"ALPSMLC30_{lat_direction.upper()}{int(float(lat_deg)):03d}"
+                f"{lon_direction.upper()}{int(float(lon_deg)):03d}_DSM.tif"
+            )
+
+        file_path = os.path.join(root_dir, tif_name) if root_dir else tif_name
+
         with rasterio.open(file_path) as dsm:
-            self.elevations = dsm.read(1)      # elevation array
-            self.transform = dsm.transform     # affine transform
-            self.nodata = dsm.nodata           # nodata value
-            self.shape = self.elevations.shape # (rows, cols)
+            self.elevations = dsm.read(1)
+            self.transform = dsm.transform
+            self.nodata = dsm.nodata
+            self.crs = dsm.crs
+            self.shape = self.elevations.shape
 
-        # If needed, extract center coordinates from the raster bounds
-        # e.g., for convenience:
         rows, cols = self.elevations.shape
-        tl = xy(self.transform, 0, 0) # top left
-        br = xy(self.transform, rows-1, cols-1) # bottom right
-        center_lat = (tl[1] + br[1]) / 2
-        center_lon = (tl[0] + br[0]) / 2
-        self.center = (center_lon, center_lat)
+        tl = xy(self.transform, 0, 0)
+        br = xy(self.transform, rows - 1, cols - 1)
+        self.center = ((tl[0] + br[0]) / 2.0, (tl[1] + br[1]) / 2.0)
 
-   
+
+class LunarTile(ComboTile):
+    """Load and analyze a USGS LRO WAC GLD100 lunar GeoTIFF DEM tile."""
+
+    LUNAR_RADIUS_M = 1_737_400.0
+
+    def __init__(self, file_name: str, root_dir: str = "Lunar_Test_Data", verbose: bool = True):
+        """
+        Initialize a LunarTile from a clipped USGS LRO WAC GLD100 GeoTIFF.
+
+        Expected filename format: ``lunar_LAT_LON.tif`` (e.g. ``lunar_9.62_-20.08.tif``).
+        """
+        base_name = os.path.basename(file_name).replace(".tif", "")
+        parts = base_name.split("_")
+        if len(parts) < 3:
+            raise ValueError(
+                f"Invalid filename format {file_name!r}; expected 'lunar_LAT_LON.tif'."
+            )
+        # Validate numeric coordinates in filename
+        float(parts[1])
+        float(parts[2])
+
+        file_path = os.path.join(root_dir, file_name) if root_dir else file_name
+
+        with rasterio.open(file_path) as src:
+            self.elevations = src.read(1)
+            self.transform = src.transform
+            self.nodata = src.nodata
+            self.shape = self.elevations.shape
+            self.crs = src.crs
+            bounds = src.bounds
+
+            self.geo_bounds = {
+                "min_lon": bounds.left,
+                "max_lon": bounds.right,
+                "min_lat": bounds.bottom,
+                "max_lat": bounds.top,
+            }
+
+            rows, cols = self.shape
+            row_idx = np.arange(rows)
+            col_idx = np.arange(cols)
+            row_grid, col_grid = np.meshgrid(row_idx, col_idx, indexing="ij")
+            lon_grid, lat_grid = xy(self.transform, row_grid, col_grid)
+            self._lon_grid = np.asarray(lon_grid)
+            self._lat_grid = np.asarray(lat_grid)
+
+        center_lon = (self.geo_bounds["min_lon"] + self.geo_bounds["max_lon"]) / 2.0
+        center_lat = (self.geo_bounds["min_lat"] + self.geo_bounds["max_lat"]) / 2.0
+        self.center = (center_lon, center_lat)
+        self.lunar_radius = self.LUNAR_RADIUS_M
+        self.geo_resolution = {
+            "lon": (self.geo_bounds["max_lon"] - self.geo_bounds["min_lon"]) / cols,
+            "lat": (self.geo_bounds["max_lat"] - self.geo_bounds["min_lat"]) / rows,
+        }
+
+        if verbose:
+            print(f"Loaded {file_name} | CRS: {self.crs}")
+            print(f"  Center: ({center_lat:.4f}°, {center_lon:.4f}°), Shape: {self.shape}")
+            print(
+                f"  Bounds: Lat [{self.geo_bounds['min_lat']:.4f}, {self.geo_bounds['max_lat']:.4f}], "
+                f"Lon [{self.geo_bounds['min_lon']:.4f}, {self.geo_bounds['max_lon']:.4f}]"
+            )
+            print(f"  Resolution: ~{self.geo_resolution['lat']:.6f}°/px")
+
+    def get_lon_lat(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return pre-computed geographic ``(lon, lat)`` coordinate grids in degrees."""
+        return self._lon_grid, self._lat_grid
+
+    def plot_map(self, ax=None):
+        """Plot the lunar elevation raster in geographic degrees with nodata masked."""
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(8, 6))
+        else:
+            fig = ax.figure
+
+        masked_elevations = np.ma.masked_invalid(self._masked_elevations())
+        extent = [
+            self.geo_bounds["min_lon"],
+            self.geo_bounds["max_lon"],
+            self.geo_bounds["min_lat"],
+            self.geo_bounds["max_lat"],
+        ]
+
+        im = ax.imshow(
+            masked_elevations,
+            extent=extent,
+            cmap="plasma",
+            origin="upper",
+            aspect="auto",
+        )
+        cbar = fig.colorbar(im, ax=ax, shrink=0.7)
+        cbar.set_label("Elevation (m)")
+        ax.set_title("Lunar Elevation Map")
+        ax.set_xlabel("Longitude (degrees)")
+        ax.set_ylabel("Latitude (degrees)")
+        ax.grid(True, alpha=0.3)
+        return fig, ax
+
+    def compute_gradient(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Compute lunar terrain gradients ``(grad_x, grad_y)`` in m/m."""
+        dx_deg = abs(self.transform.a)
+        dy_deg = abs(self.transform.e)
+        mean_lat = self.center[1]
+
+        meters_per_deg_lat = np.radians(1.0) * self.lunar_radius
+        meters_per_deg_lon = meters_per_deg_lat * np.cos(np.radians(mean_lat))
+
+        dx_m = meters_per_deg_lon * dx_deg
+        dy_m = meters_per_deg_lat * dy_deg
+
+        elev = self._masked_elevations()
+        grad_y, grad_x = np.gradient(elev, dy_m, dx_m)
+        return grad_x, grad_y
+
+    def max_elev_enu(
+        self,
+        bin_width: float = 10.0,
+        radius_max_meters: float = 100000.0,
+        radius0_meters: float = 1000.0,
+        radius_min_meters: float = 500.0,
+        lon0: Optional[float] = None,
+        lat0: Optional[float] = None,
+        include_curvature: bool = True,
+        verbose: bool = False,
+    ):
+        """
+        Compute the azimuthal lunar horizon elevation profile in the local ENU frame.
+
+        Because ``pymap3d.geodetic2enu`` projects terrain onto the tangent plane of the
+        IAU lunar ellipsoid, the ENU ``up`` coordinate natively incorporates the downward
+        surface curvature drop (approximately ``-r^2 / (2 * R_moon)``).
+
+        Parameters
+        ----------
+        bin_width : float, optional
+            Azimuth bin width in degrees (default 10.0).
+        radius_max_meters : float, optional
+            Maximum horizontal radius from observer in meters (default 100000).
+        radius0_meters : float, optional
+            Local neighborhood radius for observer elevation refinement (default 1000).
+        radius_min_meters : float, optional
+            Minimum horizontal distance guard in meters (default 500).
+        lon0, lat0 : float
+            Observer longitude and latitude in degrees (must be provided explicitly).
+        include_curvature : bool, optional
+            If True (default), use the true 3-D ENU ``up`` coordinate directly (which
+            includes lunar curvature). If False, use flat elevation differences
+            ``elev - elref`` (ignoring curvature).
+        verbose : bool, optional
+            If True, print diagnostic reference elevation and extreme-pixel summaries.
+
+        Returns
+        -------
+        el_deg, az_deg, az_centers, max_elev, max_r, max_z, max_coords
+        """
+        if lon0 is None or lat0 is None:
+            raise ValueError(
+                "lon0 and lat0 must be provided explicitly. "
+                "self.center is the mosaic geometric midpoint and is unlikely "
+                "to be the intended observation site."
+            )
+
+        clon, clat = lon0, lat0
+        lunar_ellipsoid = _get_lunar_ellipsoid()
+
+        lon, lat = self.get_lon_lat()
+        lon_flat = np.asarray(lon).ravel()
+        lat_flat = np.asarray(lat).ravel()
+        elev_flat = self.elevations.ravel().astype(float)
+        valid_mask = self._valid_mask(elev_flat)
+
+        # Bilinear seed interpolation for observer elevation
+        col_f = (clon - self.transform.c) / self.transform.a
+        row_f = (clat - self.transform.f) / self.transform.e
+        col0, row0 = int(np.floor(col_f)), int(np.floor(row_f))
+        col1, row1 = col0 + 1, row0 + 1
+        dc, dr = np.clip(col_f - col0, 0.0, 1.0), np.clip(row_f - row0, 0.0, 1.0)
+
+        nrows, ncols = self.elevations.shape
+        col0_c, col1_c = int(np.clip(col0, 0, ncols - 1)), int(np.clip(col1, 0, ncols - 1))
+        row0_c, row1_c = int(np.clip(row0, 0, nrows - 1)), int(np.clip(row1, 0, nrows - 1))
+
+        corners = np.array(
+            [
+                self.elevations[row0_c, col0_c],
+                self.elevations[row0_c, col1_c],
+                self.elevations[row1_c, col0_c],
+                self.elevations[row1_c, col1_c],
+            ],
+            dtype=float,
+        )
+        if self.nodata is not None:
+            corners[corners == float(self.nodata)] = np.nan
+
+        if np.all(np.isfinite(corners)):
+            elref_seed = float(
+                corners[0] * (1.0 - dc) * (1.0 - dr)
+                + corners[1] * dc * (1.0 - dr)
+                + corners[2] * (1.0 - dc) * dr
+                + corners[3] * dc * dr
+            )
+        else:
+            elref_seed = float(np.nanmedian(elev_flat[valid_mask]))
+
+        # Seed ENU frame to define local neighborhood around observer
+        east_seed, north_seed, _ = pm.geodetic2enu(
+            lat_flat, lon_flat, elev_flat, clat, clon, elref_seed, ell=lunar_ellipsoid
+        )
+        elref = self._estimate_reference_elevation(
+            east_seed,
+            north_seed,
+            elev_flat,
+            valid_mask,
+            radius0_meters,
+            method="linear",
+            fallback_value=elref_seed,
+        )
+
+        # Final ENU frame centered at (clat, clon, elref)
+        east, north, up = pm.geodetic2enu(
+            lat_flat, lon_flat, elev_flat, clat, clon, elref, ell=lunar_ellipsoid
+        )
+        r = np.hypot(east, north)
+        theta = np.degrees(np.arctan2(east, north))
+
+        mask = valid_mask & (r > radius_min_meters) & (r <= radius_max_meters)
+        flat_idx = np.where(mask)[0]
+        rm = r[mask]
+        dz = up[mask] if include_curvature else (elev_flat[mask] - elref)
+
+        el_deg = np.degrees(np.arctan2(dz, rm))
+        az_deg = theta[mask]
+
+        if verbose and len(el_deg) > 0:
+            obs_row = int(np.clip(round(row_f), 0, nrows - 1))
+            obs_col = int(np.clip(round(col_f), 0, ncols - 1))
+            print(f"elref: {elref:.2f} m (nearest pixel: {self.elevations[obs_row, obs_col]})")
+            print(f"el_deg range: [{el_deg.min():.2f}°, {el_deg.max():.2f}°]")
+
+        az_centers, max_elev, max_r, max_z, max_coords = self._bin_azimuth_max(
+            az_deg, el_deg, rm, dz, flat_idx, bin_width
+        )
+        return el_deg, az_deg, az_centers, max_elev, max_r, max_z, max_coords

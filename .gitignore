@@ -1,0 +1,22 @@
+# OS & Python artifacts
+.DS_Store
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+.venv/
+
+# Large local / working DEM datasets & outputs
+5x5_Test_Data/
+ALOS_Data/
+*testcrs.tif
+*.h5
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
